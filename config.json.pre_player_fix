@@ -1,0 +1,38 @@
+{
+    "season":  2026,
+    "model":  {
+                  "hca_points_per_100":  3.0,
+                  "recency_half_life_days":  30,
+                  "blowout_cap_em_per100":  25,
+                  "ridge_lambda":  50.0,
+                  "expected_possessions":  70
+              },
+    "refresh":  {
+                    "d1_source":  "whitelist",
+                    "d1_whitelist_path":  "outputs/d1_whitelist_2026.json",
+                    "allow_dynamic_d1_rebuild":  false,
+                    "backfill":  {
+                                     "start_date":  "2025-11-03",
+                                     "sleep_seconds_per_game":  0.15
+                                 },
+                    "rebuild_d1_ids_mode":  "season_to_date",
+                    "rebuild_d1_ids_days_limit":  null,
+                    "diagnostic_mode":  false,
+                    "export_format":  "xlsx",
+                    "cleanup_outputs":  false,
+                    "poll_seconds_regular":  3600,
+                    "poll_seconds_game_window":  900,
+                    "team_dir_test_days":  null,
+                    "game_window_local":  {
+                                              "start":  "10:00",
+                                              "end":  "02:00"
+                                          }
+                },
+    "data_sources":  {
+                         "primary":  "henrygd_ncaa_api",
+                         "odds_optional":  false
+                     },
+    "verify":  {
+                   "max_output_age_hours":  null
+               }
+}
