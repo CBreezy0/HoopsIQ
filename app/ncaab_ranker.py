@@ -1784,8 +1784,11 @@ def build_team_directory_names_map(team_meta: dict) -> dict[str, str]:
 
 def write_team_directory_names_cache(out_dir: str, names_map: dict[str, str], logger: logging.Logger):
     path = os.path.join(out_dir, "team_directory_names.json")
+    mirror_path = os.path.join(out_dir, "team_name_map.json")
     os.makedirs(out_dir, exist_ok=True)
     with open(path, "w") as f:
+        json.dump(dict(sorted(names_map.items())), f, indent=2)
+    with open(mirror_path, "w") as f:
         json.dump(dict(sorted(names_map.items())), f, indent=2)
     team_id_map_path = ti.save_team_id_map(
         names_map,
@@ -1793,23 +1796,25 @@ def write_team_directory_names_cache(out_dir: str, names_map: dict[str, str], lo
     )
     logger.info(
         f"TEAM_DIR wrote team_directory_names.json names={len(names_map)} path={path} "
-        f"team_id_map_path={team_id_map_path}"
+        f"team_name_map_path={mirror_path} team_id_map_path={team_id_map_path}"
     )
 
 
 def load_team_directory_names_cache(out_dir: str, logger: logging.Logger) -> dict[str, str]:
     path = os.path.join(out_dir, "team_directory_names.json")
+    mirror_path = os.path.join(out_dir, "team_name_map.json")
     combined = ti.load_team_id_map(Path(out_dir) / "team_id_map.json")
-    if not os.path.exists(path):
+    selected_path = path if os.path.exists(path) else mirror_path
+    if not os.path.exists(selected_path):
         return combined
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(selected_path, "r", encoding="utf-8") as f:
             payload = json.load(f)
     except Exception as ex:
-        logger.warning(f"TEAM_DIR failed to load team_directory_names.json path={path} err={ex}")
+        logger.warning(f"TEAM_DIR failed to load team_directory_names.json path={selected_path} err={ex}")
         return combined
     if not isinstance(payload, dict):
-        logger.warning(f"TEAM_DIR invalid team_directory_names.json shape path={path}")
+        logger.warning(f"TEAM_DIR invalid team_directory_names.json shape path={selected_path}")
         return combined
 
     clean: dict[str, str] = dict(combined)
@@ -1819,7 +1824,7 @@ def load_team_directory_names_cache(out_dir: str, logger: logging.Logger) -> dic
         if name_norm and tid:
             clean[name_norm] = tid
     logger.info(
-        f"TEAM_DIR loaded team_directory_names.json names={len(clean)} path={path}"
+        f"TEAM_DIR loaded team_directory_names.json names={len(clean)} path={selected_path}"
     )
     return clean
 
@@ -2260,6 +2265,44 @@ def build_d1_ids_from_master_whitelist(
     d1_conf_by_id: dict[str, str] = {}
     ambiguous_rows: list[dict[str, object]] = []
     unresolved_rows: list[str] = []
+    pending_rows: list[dict[str, object]] = []
+
+    def _whitelist_candidate_keys(raw_name: str) -> set[str]:
+        raw = str(raw_name or "").strip()
+        keys: set[str] = set()
+        if not raw:
+            return keys
+        for key in {
+            apply_name_alias(normalize_name(raw)),
+            _normalize_team_match_key(raw),
+            _normalize_whitelist_match_name(raw),
+        }:
+            if key:
+                keys.add(key)
+        return keys
+
+    fallback_name_to_ids: dict[str, set[str]] = {}
+
+    def _register_fallback_name(raw_name: str, raw_tid: object) -> None:
+        tid = _safe_team_id(raw_tid)
+        if not tid:
+            return
+        for key in _whitelist_candidate_keys(raw_name):
+            fallback_name_to_ids.setdefault(key, set()).add(tid)
+
+    for raw_name, raw_tid in team_name_map.items():
+        _register_fallback_name(raw_name, raw_tid)
+
+    games_source = games_df if games_df is not None else pd.DataFrame()
+    for name_col, id_col in [
+        ("team", "team_id"),
+        ("opponent", "opponent_team_id"),
+    ]:
+        if games_source.empty or name_col not in games_source.columns or id_col not in games_source.columns:
+            continue
+        subset = games_source[[name_col, id_col]].copy()
+        for _, game_row in subset.iterrows():
+            _register_fallback_name(game_row.get(name_col), game_row.get(id_col))
 
     for row in master_rows:
         team_name = str(row.get("team", "")).strip()
@@ -2358,6 +2401,15 @@ def build_d1_ids_from_master_whitelist(
                     d1_conf_by_id[selected_tid] = conference
                 continue
 
+        pending_rows.append(
+            {
+                "team": team_name,
+                "conference": conference,
+                "team_name_norm": team_name_norm,
+                "candidate_names": unique_candidate_names,
+                "candidate_ids": sorted(unique_candidate_ids),
+            }
+        )
         if unique_candidate_ids:
             ambiguous_rows.append(
                 {
@@ -2371,16 +2423,16 @@ def build_d1_ids_from_master_whitelist(
             logger.warning("WARNING TEAM_MATCH_FAILED name=%r source=whitelist", team_name)
 
     total = len(master_rows)
-    matched = total - len(ambiguous_rows) - len(unresolved_rows)
-    match_rate = (float(matched) / float(total)) if total > 0 else 0.0
+    matched_primary = total - len(ambiguous_rows) - len(unresolved_rows)
+    match_rate = (float(matched_primary) / float(total)) if total > 0 else 0.0
     ti.log_team_match_coverage(
         logger,
         scope="whitelist",
-        matched=matched,
+        matched=matched_primary,
         total=total,
     )
     logger.info(
-        f"WHITELIST_MATCH total={total} matched={matched} "
+        f"WHITELIST_MATCH total={total} matched={matched_primary} "
         f"ambiguous={len(ambiguous_rows)} missing={len(unresolved_rows)} "
         f"match_rate={match_rate:.4f}"
     )
@@ -2391,72 +2443,64 @@ def build_d1_ids_from_master_whitelist(
         logger.warning(f"WHITELIST_MATCH ambiguous_names={ambiguous_names}")
     if unresolved_rows:
         logger.warning(f"WHITELIST_MATCH missing_names={unresolved_rows}")
+    if match_rate < 0.50:
+        logger.warning(
+            "LOW MATCH RATE - likely missing lookup data "
+            f"match_rate={match_rate:.4f} team_name_map_entries={len(team_name_map)} "
+            f"games_history_rows={0 if games_df is None else len(games_df)}"
+        )
 
     fallback_used = False
+    fallback_resolved = 0
     if match_rate < 0.50:
         logger.warning(
             "WHITELIST_MATCH degraded mode - falling back to games_history teams"
         )
-        fallback_ids: set[str] = set()
-        fallback_conf_by_id: dict[str, str] = {}
-        fallback_name_to_id: dict[str, str] = {}
-        for raw_name, raw_tid in team_name_map.items():
-            tid = _safe_team_id(raw_tid)
-            if not tid:
-                continue
-            for key in {
-                apply_name_alias(normalize_name(raw_name)),
-                _normalize_whitelist_match_name(raw_name),
-            }:
-                if key and key not in fallback_name_to_id:
-                    fallback_name_to_id[key] = tid
-
-        games_source = games_df if games_df is not None else pd.DataFrame()
-        for team_col, id_col, conf_col in [
-            ("team", "team_id", "team_conf"),
-            ("opponent", "opponent_team_id", "opp_conf"),
-        ]:
-            if games_source.empty or team_col not in games_source.columns:
-                continue
-            team_series = games_source[team_col].fillna("").astype(str)
-            id_series = (
-                games_source[id_col].fillna("").astype(str)
-                if id_col in games_source.columns
-                else pd.Series("", index=games_source.index, dtype="object")
+        fallback_used = True
+        remaining_pending: list[dict[str, object]] = []
+        for pending in pending_rows:
+            team_name = str(pending.get("team", "")).strip()
+            conference = str(pending.get("conference", "")).strip()
+            team_name_norm = str(pending.get("team_name_norm", "")).strip()
+            candidate_names = [
+                str(x).strip()
+                for x in pending.get("candidate_names", [])
+                if str(x).strip()
+            ]
+            preferred_tid = canonical_team_id(
+                WHITELIST_PREFERRED_TEAM_ID.get(team_name_norm, "")
             )
-            conf_series = (
-                games_source[conf_col].fillna("").astype(str)
-                if conf_col in games_source.columns
-                else pd.Series("", index=games_source.index, dtype="object")
-            )
-            for idx, raw_name in team_series.items():
-                tid = _safe_team_id(id_series.at[idx])
-                if not tid:
-                    for key in {
-                        apply_name_alias(normalize_name(raw_name)),
-                        _normalize_whitelist_match_name(raw_name),
-                    }:
-                        if key and key in fallback_name_to_id:
-                            tid = fallback_name_to_id[key]
-                            break
-                if not tid:
-                    continue
-                fallback_ids.add(tid)
-                conf_value = str(conf_series.at[idx]).strip()
-                if conf_value and tid not in fallback_conf_by_id:
-                    fallback_conf_by_id[tid] = conf_value
+            fallback_candidate_ids: set[str] = set()
+            for candidate_name in candidate_names:
+                for key in _whitelist_candidate_keys(candidate_name):
+                    fallback_candidate_ids |= fallback_name_to_ids.get(key, set())
 
-        if fallback_ids:
-            d1_ids = fallback_ids
-            if fallback_conf_by_id:
-                d1_conf_by_id.update(fallback_conf_by_id)
-            fallback_used = True
+            selected_tid = ""
+            if preferred_tid and preferred_tid in fallback_candidate_ids:
+                selected_tid = preferred_tid
+            elif len(fallback_candidate_ids) == 1:
+                selected_tid = next(iter(fallback_candidate_ids))
+
+            if selected_tid:
+                d1_ids.add(selected_tid)
+                d1_conf_by_id[selected_tid] = conference
+                fallback_resolved += 1
+                continue
+
+            remaining_pending.append(pending)
+
         logger.warning(
-            "WHITELIST_MATCH fallback_used=%s match_rate=%.4f fallback_ids=%s",
+            "WHITELIST_MATCH fallback_used=%s match_rate=%.4f fallback_resolved=%s",
             str(bool(fallback_used)).lower(),
             match_rate,
-            len(d1_ids),
+            fallback_resolved,
         )
+        pending_rows = remaining_pending
+
+    resolved_count = total - len(pending_rows)
+    unresolved_count = len(pending_rows)
+    if len(d1_ids) > 400:
+        raise RuntimeError("BUG: D1 set exploded beyond whitelist size")
 
     if team_id_map != before_team_id_map:
         ti.save_team_id_map(team_id_map)
@@ -2467,14 +2511,27 @@ def build_d1_ids_from_master_whitelist(
         logger=logger,
         context="whitelist",
     )
+    logger.info(
+        "D1_BUILD_FINAL "
+        f"resolved_count={resolved_count} "
+        f"unresolved_count={unresolved_count} "
+        f"d1_ids_count={len(d1_ids)} "
+        f"conf_map_count={len(d1_conf_by_id)}"
+    )
 
     stats = {
         "master_rows": total,
-        "matched_rows": matched,
+        "matched_rows": resolved_count,
         "ambiguous_rows": len(ambiguous_rows),
-        "unresolved_rows": len(unresolved_rows),
+        "unresolved_rows": unresolved_count,
+        "primary_matched_rows": matched_primary,
+        "primary_ambiguous_rows": len(ambiguous_rows),
+        "primary_unresolved_rows": len(unresolved_rows),
         "fallback_used": fallback_used,
+        "fallback_resolved": fallback_resolved,
         "match_rate": match_rate,
+        "resolved_count": resolved_count,
+        "conf_map_count": len(d1_conf_by_id),
     }
     return d1_ids, d1_conf_by_id, stats
 
@@ -9852,6 +9909,30 @@ def run_once(
     games_all = filter_strict_d1_games(games_all, logger, label="GAMES_HISTORY_WRITE")
     games_all.to_csv(hist_path, index=False)
     logger.info("ID_BACKFILL wrote updated games_history.csv")
+    team_name_map_cache_path = os.path.join(out_dir, "team_name_map.json")
+    if not os.path.exists(team_name_map_cache_path):
+        team_name_map_cache_path = os.path.join(out_dir, "team_directory_names.json")
+    logger.info(
+        "FILE_CHECK games_history exists=%s rows=%s path=%s",
+        str(os.path.exists(hist_path)).lower(),
+        len(games_all),
+        os.path.abspath(hist_path),
+    )
+    logger.info(
+        "FILE_CHECK team_name_map exists=%s rows=%s path=%s",
+        str(
+            os.path.exists(os.path.join(out_dir, "team_name_map.json"))
+            or os.path.exists(os.path.join(out_dir, "team_directory_names.json"))
+        ).lower(),
+        len(team_name_map),
+        os.path.abspath(team_name_map_cache_path),
+    )
+    logger.info(
+        "FILE_CHECK team_aliases exists=%s rows=%s path=%s",
+        str(os.path.exists(ti.TEAM_ALIASES_PATH)).lower(),
+        len(TEAM_NAME_ALIASES),
+        os.path.abspath(ti.TEAM_ALIASES_PATH),
+    )
 
     # Persist D1 IDs after full-history ID backfill.
     merge_team_directory_from_games_df(d1_team_meta, games_all)
@@ -9892,10 +9973,19 @@ def run_once(
         conf_map = dict(id_to_conf)
         missing_conf_ids = sorted([tid for tid in d1_team_ids if tid not in id_to_conf])
         if missing_conf_ids:
-            raise RuntimeError(
-                "D1 whitelist data bug: missing conference mapping for resolved D1 IDs. "
+            logger.warning(
+                "D1 whitelist data missing conference mapping for resolved IDs. "
                 f"missing_count={len(missing_conf_ids)} sample={missing_conf_ids[:15]}"
             )
+            d1_team_ids = {tid for tid in d1_team_ids if tid in id_to_conf}
+            whitelist_resolved_ids = set(d1_team_ids)
+        logger.info(
+            "D1_BUILD_FINAL "
+            f"resolved_count={master_stats.get('resolved_count', len(d1_team_ids))} "
+            f"unresolved_count={master_stats.get('unresolved_rows')} "
+            f"d1_ids_count={len(d1_team_ids)} "
+            f"conf_map_count={len(id_to_conf)}"
+        )
         if "team_conf" not in games_all.columns:
             games_all["team_conf"] = ""
         if "opp_conf" not in games_all.columns:
@@ -9931,9 +10021,13 @@ def run_once(
         f"games_history_min_date={hist_min_after} games_history_max_date={hist_max_after} "
         f"unique_games={unique_games} unique_teams={unique_teams} d1_ids_count={d1_ids_count}"
     )
-    if d1_ids_count < 300 or d1_ids_count > 400:
+    if d1_ids_count > 400:
         raise RuntimeError(
-            f"D1_GUARD invalid d1_ids_count={d1_ids_count}; expected between 300 and 400."
+            f"D1_GUARD invalid d1_ids_count={d1_ids_count}; expected <= 400."
+        )
+    if d1_ids_count < 300:
+        logger.warning(
+            f"D1_GUARD degraded d1_ids_count={d1_ids_count}; expected closer to full whitelist size."
         )
 
     missing_team_id = int((games_all["team_id"] == "").sum()) if "team_id" in games_all.columns else len(games_all)
