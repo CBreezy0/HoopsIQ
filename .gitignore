@@ -1,9 +1,7 @@
 __pycache__/
+.pycache/
 *.pyc
 .env
-outputs/*.csv
-outputs/*.json
-outputs/*.pkl
-outputs/*.xlsx
+outputs/
 logs/
 .DS_Store
