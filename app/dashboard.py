@@ -6,29 +6,48 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from dashboard_data import (
-    BRACKET_MATCHUP_PROBS_PATH,
-    BRACKET_PREDICTIONS_PATH,
-    CALIBRATION_PATH,
-    DAILY_METRICS_PATH,
-    LIVE_PREDICTIONS_PATH,
-    MODEL_METRICS_PATH,
-    MOST_LIKELY_BRACKET_PATH,
-    POOL_BRACKET_PATH,
-    build_live_predictions_dataframe,
-    compute_calibration_summary,
-    compute_daily_metrics,
-    compute_metrics_summary,
-    load_predictions_log,
-)
+if __package__ in {None, ""}:
+    import sys
+
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
+    from app.dashboard_data import (
+        BRACKET_MATCHUP_PROBS_PATH,
+        BRACKET_PREDICTIONS_PATH,
+        CALIBRATION_PATH,
+        DAILY_METRICS_PATH,
+        LIVE_PREDICTIONS_PATH,
+        MODEL_METRICS_PATH,
+        MOST_LIKELY_BRACKET_PATH,
+        POOL_BRACKET_PATH,
+        build_live_predictions_dataframe,
+        compute_calibration_summary,
+        compute_daily_metrics,
+        compute_metrics_summary,
+        load_predictions_log,
+    )
+    from app.runtime import OUTPUTS_DIR
+else:
+    from .dashboard_data import (
+        BRACKET_MATCHUP_PROBS_PATH,
+        BRACKET_PREDICTIONS_PATH,
+        CALIBRATION_PATH,
+        DAILY_METRICS_PATH,
+        LIVE_PREDICTIONS_PATH,
+        MODEL_METRICS_PATH,
+        MOST_LIKELY_BRACKET_PATH,
+        POOL_BRACKET_PATH,
+        build_live_predictions_dataframe,
+        compute_calibration_summary,
+        compute_daily_metrics,
+        compute_metrics_summary,
+        load_predictions_log,
+    )
+    from .runtime import OUTPUTS_DIR
 
 try:
     import altair as alt
 except Exception:
     alt = None
-
-
-BASE_DIR = Path(__file__).resolve().parent
 
 
 @st.cache_data(show_spinner=False)
@@ -169,7 +188,7 @@ def main() -> None:
     bracket_matchup_probs_df = load_bracket_matchup_probs_df()
 
     updated_at = metrics.get("updated_at_utc", "unknown")
-    st.caption(f"Data root: `{BASE_DIR / 'outputs'}` | Updated: `{updated_at}`")
+    st.caption(f"Data root: `{OUTPUTS_DIR}` | Updated: `{updated_at}`")
 
     metric_cols = st.columns(4)
     metric_cols[0].metric("Settled Predictions", str(int(metrics.get("rows_used") or 0)))
@@ -181,7 +200,7 @@ def main() -> None:
 
     with tabs[0]:
         if live_df.empty:
-            st.warning("No live prediction file found. Run `python run_daily.py` first.")
+            st.warning("No live prediction file found. Run `python main.py --live` first.")
         else:
             live_df = live_df.copy()
             live_df["date"] = pd.to_datetime(live_df["date"], errors="coerce").dt.date
@@ -361,7 +380,7 @@ def main() -> None:
         st.subheader("Tournament Forecast")
         if bracket_predictions_df.empty:
             st.warning(
-                "Bracket artifacts not found. Run `python bracket_simulator.py --pdf /Users/breezy/Documents/2026.pdf --simulations 20000` first."
+                "Bracket artifacts not found. Run `python main.py --bracket --pdf path/to/bracket.pdf` first."
             )
         else:
             odds_df = bracket_predictions_df.copy()

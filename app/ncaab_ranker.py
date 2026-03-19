@@ -1,25 +1,42 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-from asyncio.log import logger
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import os, sys, json, math, time, logging, zipfile, hashlib, uuid, subprocess, pickle
-import io
 import html
+import io
+import json
+import logging
+import math
+import os
+import pickle
 import re
-from dataclasses import dataclass, field
-from datetime import datetime, date, timezone
-from html.parser import HTMLParser
-from zoneinfo import ZoneInfo
-from datetime import timedelta
+import subprocess
+import sys
+import time
+import uuid
 import xml.etree.ElementTree as ET
+import zipfile
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
+import hashlib
+from html.parser import HTMLParser
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+if __package__ in {None, ""}:
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
+    from app.runtime import DEFAULT_CONFIG_PATH, REPO_ROOT, load_public_config, resolve_project_root
+else:
+    from .runtime import DEFAULT_CONFIG_PATH, REPO_ROOT, load_public_config, resolve_project_root
+
 
 def daterange(start: date, end: date):
     cur = start
     while cur <= end:
         yield cur
         cur += timedelta(days=1)
+
 
 import numpy as np
 import pandas as pd
@@ -71,6 +88,14 @@ HEARTBEAT_INTERVAL_SECONDS = 15.0
 HEARTBEAT_STALL_SECONDS = 60.0
 SEASON_START = date(2025, 11, 3)
 DEFAULT_RECENCY_DECAY_FACTOR_DAYS = 30.0
+DEFAULT_D1_WHITELIST_RELPATH = "data/d1_whitelist_2026.json"
+
+_PUBLIC_CONFIG = load_public_config()
+_BETTING_CFG = (
+    _PUBLIC_CONFIG.get("betting", {})
+    if isinstance(_PUBLIC_CONFIG.get("betting", {}), dict)
+    else {}
+)
 
 
 def _norm_text(v) -> str:
@@ -112,6 +137,18 @@ def hash_config(config_dict: dict) -> str:
     except Exception:
         payload = str(config_dict)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def _default_project_root() -> str:
+    return str(REPO_ROOT)
+
+
+def _default_config_path() -> str:
+    return str(DEFAULT_CONFIG_PATH)
+
+
+def _resolve_project_root_from_cfg(cfg_path: str | None = None) -> str:
+    return str(resolve_project_root(cfg_path))
 
 
 def write_run_manifest(
@@ -1367,7 +1404,7 @@ def rebuild_full_season_games(
     out_dir: str | None = None,
 ) -> pd.DataFrame:
     logger = logger or logging.getLogger("ncaab_ranker")
-    project_root = os.path.dirname(os.path.abspath(__file__))
+    project_root = _default_project_root()
     outputs_dir = out_dir or os.path.join(project_root, "outputs")
     os.makedirs(outputs_dir, exist_ok=True)
     hist_path = os.path.join(outputs_dir, "games_history.csv")
@@ -2628,10 +2665,22 @@ def load_config(path: str) -> dict:
         return json.load(f)
 
 def setup_logger(log_path: str) -> logging.Logger:
+    logging_cfg = (
+        load_public_config().get("logging", {})
+        if isinstance(load_public_config().get("logging", {}), dict)
+        else {}
+    )
+    debug_enabled = to_bool_flag(os.environ.get("HOOPSIQ_DEBUG", False))
+    level_name = str(
+        logging_cfg.get("debug_level" if debug_enabled else "level", "INFO")
+    ).upper()
+    fmt_key = "debug_format" if debug_enabled else "format"
+    fmt_value = str(logging_cfg.get(fmt_key, "%(asctime)s %(levelname)s %(message)s"))
+
     logger = logging.getLogger("ncaab_ranker")
-    logger.setLevel(logging.INFO)
+    logger.setLevel(getattr(logging, level_name, logging.INFO))
     logger.handlers.clear()
-    fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+    fmt = logging.Formatter(fmt_value)
     fh = logging.FileHandler(log_path)
     fh.setFormatter(fmt)
     sh = logging.StreamHandler(sys.stdout)
@@ -3408,9 +3457,9 @@ PREDICTION_LOG_DEFAULTS: dict[str, object] = {
     "closing_vegas_spread": np.nan,
     "closing_vegas_provider": "",
 }
-BET_EDGE_THRESHOLD = 0.08
-BET_EDGE_MAX_ABS = 0.12
-BET_KELLY_SCALE = 0.10
+BET_EDGE_THRESHOLD = float(_BETTING_CFG.get("edge_threshold", 0.08))
+BET_EDGE_MAX_ABS = float(_BETTING_CFG.get("max_abs_edge", 0.12))
+BET_KELLY_SCALE = float(_BETTING_CFG.get("kelly_scale", 0.10))
 PREDICTION_CALIBRATION_MIN_ROWS = 200
 PREDICTION_CALIBRATION_FALLBACK_MIN_ROWS = 50
 PREDICTION_CALIBRATION_RECENT_ROWS = 100
@@ -3890,7 +3939,7 @@ def _build_prediction_adjustment_training_rows(
 
 
 def _prediction_adjustment_model_path(project_root: str | None = None) -> str:
-    root = project_root or os.path.dirname(os.path.abspath(__file__))
+    root = project_root or _default_project_root()
     return os.path.join(root, "outputs", "calibration_model.pkl")
 
 
@@ -3974,7 +4023,7 @@ def fit_prediction_probability_adjustment_model(
     force_refit: bool = False,
 ) -> dict[str, object]:
     logger = _prediction_logger(logger)
-    project_root = os.path.dirname(os.path.abspath(__file__))
+    project_root = _default_project_root()
     resolved_path = predictions_log_path or os.path.join(
         project_root,
         "outputs",
@@ -4168,7 +4217,7 @@ def fit_prediction_calibration_model(
     asof_date: date | None = None,
 ) -> dict[str, object]:
     logger = _prediction_logger(logger)
-    project_root = os.path.dirname(os.path.abspath(__file__))
+    project_root = _default_project_root()
     resolved_path = predictions_log_path or os.path.join(
         project_root,
         "outputs",
@@ -5767,17 +5816,17 @@ def build_game_predictions(
     missing_schedule_opponent_names = sorted(schedule_opponent_name_set - ratings_name_set)
     ratings_not_in_schedule = sorted(ratings_name_set - schedule_name_set)
 
-    logger.info(
+    logger.debug(
         "PREDICTIONS merge_keys counts "
         f"schedule_team_name_clean={len(schedule_team_name_set)} "
         f"schedule_opponent_name_clean={len(schedule_opponent_name_set)} "
         f"ratings_team_name_clean={len(ratings_name_set)}"
     )
-    logger.info(
+    logger.debug(
         "PREDICTIONS merge_keys schedule_team_name_clean_sample="
         f"{sorted(schedule_team_name_set)[:25]}"
     )
-    logger.info(
+    logger.debug(
         "PREDICTIONS merge_keys ratings_team_name_clean_sample="
         f"{sorted(ratings_name_set)[:25]}"
     )
@@ -5791,7 +5840,7 @@ def build_game_predictions(
             "PREDICTIONS merge_keys missing_in_ratings_opponent_name_clean_sample="
             f"{missing_schedule_opponent_names[:25]}"
         )
-    logger.info(
+    logger.debug(
         "PREDICTIONS merge_keys ratings_not_in_schedule_sample="
         f"{ratings_not_in_schedule[:25]}"
     )
@@ -6120,7 +6169,7 @@ def refresh_live_predictions(
 ) -> dict[str, object]:
     logger = _prediction_logger(logger)
     cfg = load_config(cfg_path)
-    project_root = os.path.dirname(os.path.abspath(cfg_path))
+    project_root = _resolve_project_root_from_cfg(cfg_path)
     out_dir = os.path.join(project_root, "outputs")
     os.makedirs(out_dir, exist_ok=True)
 
@@ -6372,7 +6421,7 @@ def _ensure_predictions_log_schema(
 def update_prediction_results(logger: logging.Logger | None = None) -> int:
     logger = _prediction_logger(logger)
     today = datetime.now(tz=NY).date()
-    project_root = os.path.dirname(os.path.abspath(__file__))
+    project_root = _default_project_root()
     predictions_log_path = os.path.join(project_root, "outputs", "predictions_log.csv")
     updated_rows = 0
     dates_processed = 0
@@ -6608,7 +6657,7 @@ def update_prediction_results(logger: logging.Logger | None = None) -> int:
 
 def log_prediction_metrics(logger: logging.Logger | None = None) -> dict[str, float | int | None]:
     logger = _prediction_logger(logger)
-    project_root = os.path.dirname(os.path.abspath(__file__))
+    project_root = _default_project_root()
     predictions_log_path = os.path.join(project_root, "outputs", "predictions_log.csv")
     metrics = {
         "rows_used": 0,
@@ -6704,9 +6753,9 @@ def backfill_historical_predictions(
     logger: logging.Logger | None = None,
 ) -> int:
     logger = _prediction_logger(logger)
-    project_root = os.path.dirname(os.path.abspath(__file__))
+    project_root = _default_project_root()
     out_dir = os.path.join(project_root, "outputs")
-    cfg_path = os.path.join(project_root, "config.json")
+    cfg_path = _default_config_path()
     games_history_path = os.path.join(out_dir, "games_history.csv")
     predictions_log_path = os.path.join(out_dir, "predictions_log.csv")
 
@@ -9039,7 +9088,7 @@ def run_once(
 ):
     global PLAYER_DEBUG, PLAYER_DEBUG_DUMP, _PLAYER_DUMPED_ONCE
     cfg = load_config(cfg_path)
-    project_root = os.path.dirname(cfg_path)
+    project_root = _resolve_project_root_from_cfg(cfg_path)
     out_dir = os.path.join(project_root, "outputs")
     os.makedirs(out_dir, exist_ok=True)
     log_dir = os.path.join(project_root, "logs")
@@ -9154,14 +9203,14 @@ def run_once(
     allow_dynamic_d1_rebuild = to_bool_flag(refresh_cfg.get("allow_dynamic_d1_rebuild", False))
 
     d1_whitelist_relpath = str(
-        refresh_cfg.get("d1_whitelist_path", "outputs/d1_whitelist_2026.json")
+        refresh_cfg.get("d1_whitelist_path", DEFAULT_D1_WHITELIST_RELPATH)
     ).strip()
     if not d1_whitelist_relpath:
-        d1_whitelist_relpath = "outputs/d1_whitelist_2026.json"
+        d1_whitelist_relpath = DEFAULT_D1_WHITELIST_RELPATH
     if os.path.isabs(d1_whitelist_relpath):
         d1_whitelist_path = d1_whitelist_relpath
     else:
-        d1_whitelist_path = os.path.join(os.path.dirname(cfg_path), d1_whitelist_relpath)
+        d1_whitelist_path = os.path.join(project_root, d1_whitelist_relpath)
 
     whitelist_required = d1_source == "whitelist"
     dynamic_rebuild_allowed = (d1_source == "dynamic") or allow_dynamic_d1_rebuild
@@ -9830,7 +9879,7 @@ def run_once(
 
 def rebuild_players_only(cfg_path: str) -> int:
     cfg = load_config(cfg_path)
-    project_root = os.path.dirname(cfg_path)
+    project_root = _resolve_project_root_from_cfg(cfg_path)
     out_dir = os.path.join(project_root, "outputs")
     log_dir = os.path.join(project_root, "logs")
     os.makedirs(log_dir, exist_ok=True)
@@ -9892,8 +9941,8 @@ def rebuild_players_only(cfg_path: str) -> int:
     season = int(cfg.get("season", date.today().year))
     refresh_cfg = cfg.get("refresh", {}) if isinstance(cfg.get("refresh", {}), dict) else {}
     d1_whitelist_relpath = str(
-        refresh_cfg.get("d1_whitelist_path", "outputs/d1_whitelist_2026.json")
-    ).strip() or "outputs/d1_whitelist_2026.json"
+        refresh_cfg.get("d1_whitelist_path", DEFAULT_D1_WHITELIST_RELPATH)
+    ).strip() or DEFAULT_D1_WHITELIST_RELPATH
     if os.path.isabs(d1_whitelist_relpath):
         d1_whitelist_path = d1_whitelist_relpath
     else:
@@ -10080,7 +10129,8 @@ def _xlsx_sheet_summary(path: str) -> dict:
 
 def verify_outputs(cfg_path: str) -> int:
     cfg = load_config(cfg_path)
-    out_dir = os.path.join(os.path.dirname(cfg_path), "outputs")
+    project_root = _resolve_project_root_from_cfg(cfg_path)
+    out_dir = os.path.join(project_root, "outputs")
     refresh_cfg = cfg.get("refresh", {})
     verify_cfg = cfg.get("verify", {}) if isinstance(cfg.get("verify", {}), dict) else {}
     failures = 0
@@ -10108,12 +10158,12 @@ def verify_outputs(cfg_path: str) -> int:
         print(f"VERIFY manifest status=NONE path={os.path.abspath(manifest_path)}")
 
     d1_whitelist_relpath = str(
-        refresh_cfg.get("d1_whitelist_path", "outputs/d1_whitelist_2026.json")
-    ).strip() or "outputs/d1_whitelist_2026.json"
+        refresh_cfg.get("d1_whitelist_path", DEFAULT_D1_WHITELIST_RELPATH)
+    ).strip() or DEFAULT_D1_WHITELIST_RELPATH
     if os.path.isabs(d1_whitelist_relpath):
         d1_whitelist_path = d1_whitelist_relpath
     else:
-        d1_whitelist_path = os.path.join(os.path.dirname(cfg_path), d1_whitelist_relpath)
+        d1_whitelist_path = os.path.join(project_root, d1_whitelist_relpath)
 
     whitelist_rows = []
     whitelist_confs = set()
@@ -10445,7 +10495,8 @@ def verify_outputs(cfg_path: str) -> int:
 
 def run_daemon(cfg_path: str):
     cfg = load_config(cfg_path)
-    log_dir = os.path.join(os.path.dirname(cfg_path), "logs")
+    project_root = _resolve_project_root_from_cfg(cfg_path)
+    log_dir = os.path.join(project_root, "logs")
     os.makedirs(log_dir, exist_ok=True)
     logger = setup_logger(os.path.join(log_dir, "run.log"))
     reg = int(cfg["refresh"]["poll_seconds_regular"])
@@ -10472,8 +10523,7 @@ def run_daemon(cfg_path: str):
         time.sleep(max(60, gw if in_window(now) else reg))
 
 if __name__ == "__main__":
-    here = os.path.dirname(os.path.abspath(__file__))
-    cfg_path = os.path.join(here, "config.json")
+    cfg_path = _default_config_path()
     parser = argparse.ArgumentParser()
     parser.add_argument("command", nargs="?", choices=["daemon", "verify"])
     parser.add_argument("--verify", action="store_true")

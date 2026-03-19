@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import sys
 import warnings
 from datetime import timedelta
 from pathlib import Path
@@ -11,16 +12,21 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-import ncaab_ranker as nr
+if __package__ in {None, ""}:
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
+    from app import ncaab_ranker as nr
+    from app.runtime import DEFAULT_CONFIG_PATH, OUTPUTS_DIR, REPO_ROOT, build_public_logger
+else:
+    from app import ncaab_ranker as nr
+    from app.runtime import DEFAULT_CONFIG_PATH, OUTPUTS_DIR, REPO_ROOT, build_public_logger
 
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 warnings.filterwarnings("ignore", message="urllib3 v2 only supports OpenSSL")
 
 
-ROOT = Path(__file__).resolve().parent
-OUTPUTS_DIR = ROOT / "outputs"
-CONFIG_PATH = ROOT / "config.json"
+ROOT = REPO_ROOT
+CONFIG_PATH = DEFAULT_CONFIG_PATH
 PREDICTIONS_LOG_PATH = OUTPUTS_DIR / "predictions_log.csv"
 GAMES_HISTORY_PATH = OUTPUTS_DIR / "games_history.csv"
 RESULTS_PATH = OUTPUTS_DIR / "model_backtest_results.csv"
@@ -32,11 +38,7 @@ DEFAULT_RIDGE_VALUES = (20.0, 50.0, 100.0)
 
 
 def _quiet_logger() -> logging.Logger:
-    logger = logging.getLogger("model_backtest")
-    if not logger.handlers:
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter("%(message)s"))
-        logger.addHandler(handler)
+    logger = build_public_logger("model_backtest")
     logger.setLevel(logging.CRITICAL)
     return logger
 
@@ -503,7 +505,7 @@ def run_sweep(mode: str) -> pd.DataFrame:
     return results_df
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--mode",
@@ -513,9 +515,9 @@ def main() -> None:
     parser.add_argument(
         "--apply-best",
         action="store_true",
-        help="Write the best discovered parameters back to config.json",
+        help="Write the best discovered parameters back to config/config.json",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     eval_df = _build_eval_frame()
     _print_error_analysis(eval_df)
@@ -552,7 +554,8 @@ def main() -> None:
             fh.write("\n")
         print()
         print(f"UPDATED_CONFIG {CONFIG_PATH}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

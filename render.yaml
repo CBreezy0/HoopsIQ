@@ -1,20 +1,20 @@
 services:
   - type: web
-    name: ncaab-dashboard
+    name: hoopsiq-dashboard
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: streamlit run dashboard.py --server.address 0.0.0.0 --server.port $PORT
+    startCommand: streamlit run app/dashboard.py --server.address 0.0.0.0 --server.port $PORT
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
 
   - type: cron
-    name: ncaab-daily-pipeline
+    name: hoopsiq-daily-pipeline
     runtime: python
     schedule: "0 13 * * *"
     buildCommand: pip install -r requirements.txt
-    startCommand: python run_daily.py
+    startCommand: python main.py --backfill
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9

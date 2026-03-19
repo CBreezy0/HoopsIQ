@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import sys
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
@@ -11,24 +12,25 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-import dashboard_data as dd
-import model_backtest as mb
-import ncaab_ranker as nr
+if __package__ in {None, ""}:
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
+    from app import dashboard_data as dd
+    from app import ncaab_ranker as nr
+    from app.runtime import OUTPUTS_DIR, REPO_ROOT, build_public_logger
+    from scripts import model_backtest as mb
+else:
+    from app import dashboard_data as dd
+    from app import ncaab_ranker as nr
+    from app.runtime import OUTPUTS_DIR, REPO_ROOT, build_public_logger
+    from scripts import model_backtest as mb
 
 
-ROOT = Path(__file__).resolve().parent
-OUTPUTS_DIR = ROOT / "outputs"
+ROOT = REPO_ROOT
 BACKTEST_RESULTS_PATH = OUTPUTS_DIR / "model_backtest_results.csv"
 
 
 def _logger() -> logging.Logger:
-    logger = logging.getLogger("diagnose_live_gap")
-    if not logger.handlers:
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter("%(message)s"))
-        logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
-    return logger
+    return build_public_logger("diagnose_live_gap")
 
 
 def _clip_probs(series: pd.Series) -> pd.Series:
@@ -362,12 +364,12 @@ def _largest_differences(
     return notes
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Diagnose live-vs-backtest performance gap.")
     parser.add_argument("--recent-days", type=int, default=14)
     parser.add_argument("--skip-vegas", action="store_true")
     parser.add_argument("--skip-replay", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     logger = _logger()
     eval_df = _settled_predictions()

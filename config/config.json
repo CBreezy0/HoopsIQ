@@ -1,5 +1,23 @@
 {
     "season":  2026,
+    "paths":  {
+                  "data_dir":  "data",
+                  "outputs_dir":  "outputs",
+                  "logs_dir":  "logs"
+              },
+    "logging":  {
+                    "level":  "INFO",
+                    "debug_level":  "DEBUG",
+                    "format":  "%(asctime)s %(levelname)s %(message)s",
+                    "debug_format":  "%(asctime)s %(levelname)s %(name)s %(message)s"
+                },
+    "betting":  {
+                    "edge_threshold":  0.08,
+                    "max_abs_edge":  0.12,
+                    "kelly_scale":  0.1,
+                    "market_vig_approx":  0.02,
+                    "live_bankroll_start":  1.0
+                },
     "model":  {
                   "hca_points_per_100":  4.0,
                   "recency_decay_factor_days":  40,
@@ -10,7 +28,7 @@
               },
     "refresh":  {
                     "d1_source":  "whitelist",
-                    "d1_whitelist_path":  "outputs/d1_whitelist_2026.json",
+                    "d1_whitelist_path":  "data/d1_whitelist_2026.json",
                     "allow_dynamic_d1_rebuild":  false,
                     "backfill":  {
                                      "start_date":  "2025-11-03",

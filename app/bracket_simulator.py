@@ -3,13 +3,21 @@ from __future__ import annotations
 import argparse
 import logging
 import re
+import warnings
 from itertools import combinations
 from pathlib import Path
+import sys
 
 import numpy as np
 import pandas as pd
 
-import ncaab_ranker as nr
+if __package__ in {None, ""}:
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
+    from app import ncaab_ranker as nr
+    from app.runtime import DEFAULT_CONFIG_PATH, OUTPUTS_DIR, REPO_ROOT, build_public_logger
+else:
+    from . import ncaab_ranker as nr
+    from .runtime import DEFAULT_CONFIG_PATH, OUTPUTS_DIR, REPO_ROOT, build_public_logger
 
 try:
     import fitz
@@ -131,13 +139,7 @@ SCHOOL_QUALIFIER_TOKENS = {
 
 
 def build_logger() -> logging.Logger:
-    logger = logging.getLogger("bracket_simulator")
-    if not logger.handlers:
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-        logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
-    return logger
+    return build_public_logger("bracket_simulator")
 
 
 def _quiet_model_logger() -> logging.Logger:
@@ -228,7 +230,7 @@ def parse_bracket_pdf(pdf_path: str | Path) -> pd.DataFrame:
 
 def load_ratings_df(project_root: str | Path) -> pd.DataFrame:
     project_root = Path(project_root)
-    ratings_path = project_root / "outputs" / "teams_power_full.xlsx"
+    ratings_path = project_root / OUTPUTS_DIR.name / "teams_power_full.xlsx"
     if not ratings_path.exists():
         raise FileNotFoundError(f"Ratings file not found: {ratings_path}")
     ratings_df = pd.read_excel(ratings_path)
@@ -240,13 +242,13 @@ def load_ratings_df(project_root: str | Path) -> pd.DataFrame:
 def rebuild_ratings_df(project_root: str | Path, logger: logging.Logger | None = None) -> pd.DataFrame:
     logger = build_logger() if logger is None else logger
     project_root = Path(project_root)
-    games_path = project_root / "outputs" / "games_history.csv"
-    cfg_path = project_root / "config.json"
+    games_path = project_root / OUTPUTS_DIR.name / "games_history.csv"
+    cfg_path = project_root / DEFAULT_CONFIG_PATH.relative_to(REPO_ROOT)
 
     if not games_path.exists():
         raise FileNotFoundError(f"games_history.csv not found: {games_path}")
     if not cfg_path.exists():
-        raise FileNotFoundError(f"config.json not found: {cfg_path}")
+        raise FileNotFoundError(f"Config file not found: {cfg_path}")
 
     games_df = pd.read_csv(games_path)
     if games_df.empty:
@@ -265,12 +267,14 @@ def rebuild_ratings_df(project_root: str | Path, logger: logging.Logger | None =
         "BRACKET rebuilding_ratings "
         f"source={games_path} rows={len(games_df)} asof={asof_day}"
     )
-    ratings_df = nr.compute_ratings(
-        games=games_df,
-        cfg=cfg,
-        logger=logger,
-        asof=asof_day,
-    )
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=RuntimeWarning)
+        ratings_df = nr.compute_ratings(
+            games=games_df,
+            cfg=cfg,
+            logger=logger,
+            asof=asof_day,
+        )
     if ratings_df.empty:
         raise RuntimeError("compute_ratings returned an empty dataframe for bracket simulation")
     logger.info(
@@ -1589,16 +1593,16 @@ def run_bracket_predictions(
     return sim_df, matchup_probs_df, most_likely_df, pool_df
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--pdf",
-        default="/Users/breezy/Documents/2026.pdf",
+        required=True,
         help="Path to the tournament bracket PDF.",
     )
     parser.add_argument(
         "--project-root",
-        default=str(Path(__file__).resolve().parent),
+        default=str(REPO_ROOT),
         help="Project root containing outputs/teams_power_full.xlsx.",
     )
     parser.add_argument(
@@ -1613,7 +1617,7 @@ def main() -> int:
         default=50,
         help="Bracket pool size used for pool EV optimization.",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     logger = build_logger()
     run_bracket_predictions(

@@ -1,38 +1,28 @@
 from __future__ import annotations
 
 import argparse
-import logging
 import subprocess
 import sys
 from pathlib import Path
 
-import ncaab_ranker as nr
-
-from dashboard_data import write_dashboard_artifacts
-
-
-BASE_DIR = Path(__file__).resolve().parent
-
-
-def build_logger() -> logging.Logger:
-    logger = logging.getLogger("run_daily")
-    if not logger.handlers:
-        handler = logging.StreamHandler()
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s %(levelname)s %(message)s")
-        )
-        logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
-    return logger
+if __package__ in {None, ""}:
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
+    from app import ncaab_ranker as nr
+    from app.dashboard_data import write_dashboard_artifacts
+    from app.runtime import DEFAULT_CONFIG_PATH, REPO_ROOT, build_public_logger
+else:
+    from . import ncaab_ranker as nr
+    from .dashboard_data import write_dashboard_artifacts
+    from .runtime import DEFAULT_CONFIG_PATH, REPO_ROOT, build_public_logger
 
 
-def run_ranker(logger: logging.Logger) -> None:
-    cmd = [sys.executable, "ncaab_ranker.py"]
+def run_ranker(logger) -> None:
+    cmd = [sys.executable, "-m", "app.ncaab_ranker"]
     logger.info("RUN_DAILY step=ranker command=%s", " ".join(cmd))
-    subprocess.run(cmd, cwd=BASE_DIR, check=True)
+    subprocess.run(cmd, cwd=REPO_ROOT, check=True)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--skip-ranker",
@@ -49,14 +39,14 @@ def main() -> int:
         action="store_true",
         help="Skip full rebuild/backfill and only refresh today's live predictions and bets.",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
-    logger = build_logger()
+    logger = build_public_logger("run_daily")
 
     try:
         if args.live_only:
             live_summary = nr.refresh_live_predictions(
-                cfg_path=str(BASE_DIR / "config.json"),
+                cfg_path=str(DEFAULT_CONFIG_PATH),
                 logger=logger,
             )
             artifact_summary = write_dashboard_artifacts(

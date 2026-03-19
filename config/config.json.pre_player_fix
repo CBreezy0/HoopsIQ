@@ -9,7 +9,7 @@
               },
     "refresh":  {
                     "d1_source":  "whitelist",
-                    "d1_whitelist_path":  "outputs/d1_whitelist_2026.json",
+                    "d1_whitelist_path":  "data/d1_whitelist_2026.json",
                     "allow_dynamic_d1_rebuild":  false,
                     "backfill":  {
                                      "start_date":  "2025-11-03",

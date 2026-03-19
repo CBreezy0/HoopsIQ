@@ -1,6 +1,7 @@
 __pycache__/
 .pycache/
 *.pyc
+.venv/
 .env
 outputs/
 logs/

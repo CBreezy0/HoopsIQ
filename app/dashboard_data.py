@@ -8,11 +8,17 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-import ncaab_ranker as nr
+if __package__ in {None, ""}:
+    import sys
+
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
+    from app import ncaab_ranker as nr
+    from app.runtime import OUTPUTS_DIR, load_public_config
+else:
+    from . import ncaab_ranker as nr
+    from .runtime import OUTPUTS_DIR, load_public_config
 
 
-BASE_DIR = Path(__file__).resolve().parent
-OUTPUTS_DIR = BASE_DIR / "outputs"
 GAME_PREDICTIONS_PATH = OUTPUTS_DIR / "game_predictions.csv"
 PREDICTIONS_LOG_PATH = OUTPUTS_DIR / "predictions_log.csv"
 LIVE_PREDICTIONS_PATH = OUTPUTS_DIR / "live_predictions_dashboard.csv"
@@ -29,8 +35,14 @@ BRACKET_PREDICTIONS_PATH = OUTPUTS_DIR / "bracket_predictions.csv"
 MOST_LIKELY_BRACKET_PATH = OUTPUTS_DIR / "most_likely_bracket.csv"
 POOL_BRACKET_PATH = OUTPUTS_DIR / "pool_bracket.csv"
 BRACKET_MATCHUP_PROBS_PATH = OUTPUTS_DIR / "bracket_matchup_probs.csv"
-MARKET_VIG_APPROX = 0.02
-LIVE_BANKROLL_START = 1.0
+_PUBLIC_CONFIG = load_public_config()
+_BETTING_CFG = (
+    _PUBLIC_CONFIG.get("betting", {})
+    if isinstance(_PUBLIC_CONFIG.get("betting", {}), dict)
+    else {}
+)
+MARKET_VIG_APPROX = float(_BETTING_CFG.get("market_vig_approx", 0.02))
+LIVE_BANKROLL_START = float(_BETTING_CFG.get("live_bankroll_start", 1.0))
 
 
 def _dashboard_logger(logger: logging.Logger | None = None) -> logging.Logger:
