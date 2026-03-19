@@ -15,15 +15,11 @@ if __package__ in {None, ""}:
         BRACKET_PREDICTIONS_PATH,
         CALIBRATION_PATH,
         DAILY_METRICS_PATH,
+        GAME_PREDICTIONS_PATH,
         LIVE_PREDICTIONS_PATH,
         MODEL_METRICS_PATH,
         MOST_LIKELY_BRACKET_PATH,
         POOL_BRACKET_PATH,
-        build_live_predictions_dataframe,
-        compute_calibration_summary,
-        compute_daily_metrics,
-        compute_metrics_summary,
-        load_predictions_log,
     )
     from app.runtime import OUTPUTS_DIR, bootstrap_live_data_generation, build_public_logger
 else:
@@ -32,15 +28,11 @@ else:
         BRACKET_PREDICTIONS_PATH,
         CALIBRATION_PATH,
         DAILY_METRICS_PATH,
+        GAME_PREDICTIONS_PATH,
         LIVE_PREDICTIONS_PATH,
         MODEL_METRICS_PATH,
         MOST_LIKELY_BRACKET_PATH,
         POOL_BRACKET_PATH,
-        build_live_predictions_dataframe,
-        compute_calibration_summary,
-        compute_daily_metrics,
-        compute_metrics_summary,
-        load_predictions_log,
     )
     from .runtime import OUTPUTS_DIR, bootstrap_live_data_generation, build_public_logger
 
@@ -59,10 +51,33 @@ def bootstrap_live_data() -> dict[str, object]:
 @st.cache_data(show_spinner=False)
 def load_live_predictions() -> pd.DataFrame:
     if LIVE_PREDICTIONS_PATH.exists():
-        df = pd.read_csv(LIVE_PREDICTIONS_PATH)
-        if not df.empty:
-            return df
-    return build_live_predictions_dataframe(fetch_market=False)
+        try:
+            df = pd.read_csv(LIVE_PREDICTIONS_PATH)
+            if not df.empty:
+                return df
+        except Exception:
+            pass
+    if GAME_PREDICTIONS_PATH.exists():
+        try:
+            df = pd.read_csv(GAME_PREDICTIONS_PATH)
+            if not df.empty:
+                for col, default in {
+                    "vegas_win_prob": pd.NA,
+                    "fair_vegas_win_prob": pd.NA,
+                    "vegas_spread": pd.NA,
+                    "vegas_provider": "",
+                    "edge": pd.NA,
+                    "abs_edge": pd.NA,
+                    "spread_edge": pd.NA,
+                    "team_name_clean": "",
+                    "opponent_name_clean": "",
+                }.items():
+                    if col not in df.columns:
+                        df[col] = default
+                return df
+        except Exception:
+            pass
+    return pd.DataFrame()
 
 
 @st.cache_data(show_spinner=False)
@@ -72,7 +87,13 @@ def load_metrics_summary() -> dict[str, object]:
             return json.loads(MODEL_METRICS_PATH.read_text(encoding="utf-8"))
         except Exception:
             pass
-    return compute_metrics_summary(load_predictions_log())
+    return {
+        "updated_at_utc": "unknown",
+        "rows_used": 0,
+        "brier_score": None,
+        "log_loss": None,
+        "spread_mae": None,
+    }
 
 
 @st.cache_data(show_spinner=False)
@@ -82,7 +103,7 @@ def load_daily_metrics_df() -> pd.DataFrame:
             return pd.read_csv(DAILY_METRICS_PATH)
         except Exception:
             pass
-    return compute_daily_metrics(load_predictions_log())
+    return pd.DataFrame()
 
 
 @st.cache_data(show_spinner=False)
@@ -92,7 +113,7 @@ def load_calibration_df() -> pd.DataFrame:
             return pd.read_csv(CALIBRATION_PATH)
         except Exception:
             pass
-    return compute_calibration_summary(load_predictions_log())
+    return pd.DataFrame()
 
 
 @st.cache_data(show_spinner=False)
@@ -181,6 +202,7 @@ def render_calibration_chart(calibration_df: pd.DataFrame) -> None:
 
 
 def main() -> None:
+    logger = build_public_logger("dashboard.startup")
     st.set_page_config(page_title="NCAAB Live Dashboard", layout="wide")
     st.title("NCAAB Live Prediction Dashboard")
 
@@ -196,8 +218,17 @@ def main() -> None:
 
     updated_at = metrics.get("updated_at_utc", "unknown")
     st.caption(f"Data root: `{OUTPUTS_DIR}` | Updated: `{updated_at}`")
-    if bootstrap_status.get("ran") and not bootstrap_status.get("ready"):
+    if bootstrap_status.get("mode") == "light" and bootstrap_status.get("missing_or_empty"):
+        st.info("Live predictions not generated yet. Cached artifacts are being used.")
+    elif bootstrap_status.get("ran") and not bootstrap_status.get("ready"):
         st.warning("Live data bootstrap ran, but some required output files are still missing.")
+    logger.info(
+        "DASHBOARD startup_ready=%s mode=%s live_rows=%s rows_used=%s",
+        str(True).lower(),
+        bootstrap_status.get("mode", "unknown"),
+        len(live_df),
+        metrics.get("rows_used"),
+    )
 
     metric_cols = st.columns(4)
     metric_cols[0].metric("Settled Predictions", str(int(metrics.get("rows_used") or 0)))
@@ -209,7 +240,7 @@ def main() -> None:
 
     with tabs[0]:
         if live_df.empty:
-            st.warning("No live prediction file found. Run `python main.py --live` first.")
+            st.info("Live predictions not generated yet.")
         else:
             live_df = live_df.copy()
             live_df["date"] = pd.to_datetime(live_df["date"], errors="coerce").dt.date

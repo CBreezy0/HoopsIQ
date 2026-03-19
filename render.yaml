@@ -8,6 +8,12 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
+      - key: WEB_LIGHT_MODE
+        value: "1"
+      - key: DISABLE_AUTO_BACKFILL
+        value: "1"
+      - key: DISABLE_AUTO_BRACKET
+        value: "1"
 
   - type: cron
     name: hoopsiq-daily-pipeline

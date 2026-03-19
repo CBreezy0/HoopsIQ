@@ -45,6 +45,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.live_only:
+            logger.info("LIVE_REFRESH mode=today_only")
             live_summary = nr.refresh_live_predictions(
                 cfg_path=str(DEFAULT_CONFIG_PATH),
                 logger=logger,
@@ -52,6 +53,7 @@ def main(argv: list[str] | None = None) -> int:
             artifact_summary = write_dashboard_artifacts(
                 logger=logger,
                 fetch_market=not args.skip_market,
+                lightweight=True,
             )
             logger.info("PREDICTIONS live_rows=%s", live_summary.get("rows"))
             logger.info("BETS generated=%s", artifact_summary.get("bet_rows"))

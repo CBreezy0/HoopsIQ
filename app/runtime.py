@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -26,8 +27,9 @@ TEAM_DIRECTORY_NAMES_PATH = OUTPUTS_DIR / "team_directory_names.json"
 TEAM_NAME_MAP_PATH = OUTPUTS_DIR / "team_name_map.json"
 TEAM_ID_MAP_PATH = OUTPUTS_DIR / "team_id_map.json"
 TEAM_ALIASES_PATH = DATA_DIR / "team_aliases.json"
+GAME_PREDICTIONS_PATH = OUTPUTS_DIR / "game_predictions.csv"
 LIVE_REQUIRED_OUTPUTS = (
-    OUTPUTS_DIR / "game_predictions.csv",
+    GAME_PREDICTIONS_PATH,
     OUTPUTS_DIR / "predictions_log.csv",
 )
 
@@ -165,6 +167,19 @@ def _file_exists_with_content(path: Path) -> bool:
         return False
 
 
+def _env_flag(name: str) -> bool:
+    return str(os.environ.get(name, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def bootstrap_mode() -> str:
+    raw_mode = str(os.environ.get("BOOTSTRAP_MODE", "")).strip().lower()
+    if raw_mode in {"light", "full"}:
+        return raw_mode
+    if _env_flag("WEB_LIGHT_MODE"):
+        return "light"
+    return "full"
+
+
 def ratings_output_status() -> dict[str, object]:
     row_count = _xlsx_row_count(RATINGS_OUTPUT_PATH)
     ready = bool(_file_exists_with_content(RATINGS_OUTPUT_PATH) and (row_count or 0) > 0)
@@ -273,10 +288,39 @@ def _run_main_command(args: list[str], logger: logging.Logger, log_message: str)
 def bootstrap_live_data_generation(logger: logging.Logger | None = None) -> dict[str, object]:
     ensure_runtime_dirs()
     logger = logger or build_public_logger("bootstrap")
+    mode = bootstrap_mode()
+    auto_backfill_disabled = _env_flag("DISABLE_AUTO_BACKFILL") or mode == "light"
+    auto_bracket_disabled = _env_flag("DISABLE_AUTO_BRACKET") or mode == "light"
+    logger.info("BOOTSTRAP mode=%s", mode)
+    logger.info("BOOTSTRAP skipped_backfill=%s", str(bool(auto_backfill_disabled)).lower())
+    logger.info("BOOTSTRAP skipped_bracket=%s", str(bool(auto_bracket_disabled)).lower())
     log_startup_file_checks(logger)
     ratings_status = ratings_output_status()
     lookup_status = lookup_data_status()
     live_status = live_outputs_status()
+    live_predictions_ready = _csv_has_data_rows(GAME_PREDICTIONS_PATH)
+
+    if mode == "light":
+        ran = False
+        if not live_predictions_ready:
+            ran = True
+            _run_main_command(
+                ["--live"],
+                logger,
+                "BOOTSTRAP running live predictions",
+            )
+            log_startup_file_checks(logger)
+            live_status = live_outputs_status()
+        return {
+            "ran": ran,
+            "ready": True,
+            "missing_or_empty": list(live_status["missing_or_empty"]),
+            "ratings_ready": bool(ratings_status["ready"]),
+            "lookup_ready": bool(lookup_status["ready"]),
+            "ratings_missing_or_empty": list(ratings_status["missing_or_empty"]),
+            "lookup_missing_or_empty": list(lookup_status["missing_or_empty"]),
+            "mode": mode,
+        }
 
     if ratings_status["ready"] and lookup_status["ready"] and live_status["ready"]:
         return {
@@ -285,10 +329,11 @@ def bootstrap_live_data_generation(logger: logging.Logger | None = None) -> dict
             "missing_or_empty": [],
             "ratings_ready": True,
             "lookup_ready": True,
+            "mode": mode,
         }
 
     ran = False
-    if not ratings_status["ready"] or not lookup_status["ready"]:
+    if (not auto_backfill_disabled) and (not ratings_status["ready"] or not lookup_status["ready"]):
         ran = True
         _run_main_command(
             ["--backfill"],
@@ -318,4 +363,5 @@ def bootstrap_live_data_generation(logger: logging.Logger | None = None) -> dict
         "lookup_ready": bool(lookup_status["ready"]),
         "ratings_missing_or_empty": list(ratings_status["missing_or_empty"]),
         "lookup_missing_or_empty": list(lookup_status["missing_or_empty"]),
+        "mode": mode,
     }

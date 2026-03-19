@@ -127,6 +127,16 @@ def _read_csv(path: Path) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
+def _read_json(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
 def _clip_probs(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce").clip(lower=1e-6, upper=1 - 1e-6)
 
@@ -1043,6 +1053,7 @@ def compute_live_betting_performance_log(
 def write_dashboard_artifacts(
     logger: logging.Logger | None = None,
     fetch_market: bool = True,
+    lightweight: bool = False,
 ) -> dict[str, object]:
     logger = _dashboard_logger(logger)
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1069,38 +1080,47 @@ def write_dashboard_artifacts(
     pred_log_df = load_predictions_log()
     live_bets_logged = append_live_bets_log(live_df=live_df, logger=logger)
     bets_log_df = update_live_bets_log(pred_log_df=pred_log_df, logger=logger)
-    metrics = compute_metrics_summary(pred_log_df)
-    metrics_payload = {
-        "updated_at_utc": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
-        **metrics,
-    }
-    MODEL_METRICS_PATH.write_text(
-        json.dumps(metrics_payload, indent=2),
-        encoding="utf-8",
-    )
+    if lightweight:
+        metrics = _read_json(MODEL_METRICS_PATH)
+        betting_metrics = _read_json(BETTING_METRICS_PATH)
+        betting_bucket_df = _read_csv(BETTING_BUCKET_METRICS_PATH)
+        if LIVE_BETTING_PERFORMANCE_PATH.exists():
+            live_betting_perf_df = _read_csv(LIVE_BETTING_PERFORMANCE_PATH)
+        else:
+            live_betting_perf_df = pd.DataFrame()
+    else:
+        metrics = compute_metrics_summary(pred_log_df)
+        metrics_payload = {
+            "updated_at_utc": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+            **metrics,
+        }
+        MODEL_METRICS_PATH.write_text(
+            json.dumps(metrics_payload, indent=2),
+            encoding="utf-8",
+        )
 
-    daily_metrics_df = compute_daily_metrics(pred_log_df)
-    daily_metrics_df.to_csv(DAILY_METRICS_PATH, index=False)
+        daily_metrics_df = compute_daily_metrics(pred_log_df)
+        daily_metrics_df.to_csv(DAILY_METRICS_PATH, index=False)
 
-    calibration_df = compute_calibration_summary(pred_log_df)
-    calibration_df.to_csv(CALIBRATION_PATH, index=False)
+        calibration_df = compute_calibration_summary(pred_log_df)
+        calibration_df.to_csv(CALIBRATION_PATH, index=False)
 
-    betting_metrics = compute_betting_performance_summary(
-        pred_log_df,
-        bets_log_df=bets_log_df,
-    )
-    betting_bucket_df = compute_betting_bucket_metrics(pred_log_df)
-    betting_bucket_df.to_csv(BETTING_BUCKET_METRICS_PATH, index=False)
-    live_betting_perf_df = compute_live_betting_performance_log(bets_log_df)
-    live_betting_perf_df.to_csv(LIVE_BETTING_PERFORMANCE_PATH, index=False)
-    betting_payload = {
-        "updated_at_utc": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
-        **betting_metrics,
-    }
-    BETTING_METRICS_PATH.write_text(
-        json.dumps(betting_payload, indent=2),
-        encoding="utf-8",
-    )
+        betting_metrics = compute_betting_performance_summary(
+            pred_log_df,
+            bets_log_df=bets_log_df,
+        )
+        betting_bucket_df = compute_betting_bucket_metrics(pred_log_df)
+        betting_bucket_df.to_csv(BETTING_BUCKET_METRICS_PATH, index=False)
+        live_betting_perf_df = compute_live_betting_performance_log(bets_log_df)
+        live_betting_perf_df.to_csv(LIVE_BETTING_PERFORMANCE_PATH, index=False)
+        betting_payload = {
+            "updated_at_utc": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+            **betting_metrics,
+        }
+        BETTING_METRICS_PATH.write_text(
+            json.dumps(betting_payload, indent=2),
+            encoding="utf-8",
+        )
 
     summary = {
         "live_rows": int(len(live_df)),
@@ -1126,6 +1146,7 @@ def write_dashboard_artifacts(
     }
     logger.info(
         "DASHBOARD artifacts_written "
+        f"mode={'lightweight' if lightweight else 'full'} "
         f"live_rows={summary['live_rows']} top_edge_rows={summary['top_edge_rows']} "
         f"bet_rows={summary['bet_rows']} rows_used={summary['rows_used']}"
     )

@@ -6501,6 +6501,11 @@ def refresh_live_predictions(
     target_day = day or datetime.now(tz=NY).date()
     src_base = str(base_url or os.environ.get("NCAA_API_BASE_URL", "")).strip()
     season = int(cfg.get("season", date.today().year))
+    logger.info(
+        "LIVE_REFRESH mode=today_only day=%s base_url=%s",
+        target_day,
+        src_base or "unset",
+    )
     predictions_path = os.path.join(out_dir, "game_predictions.csv")
     predictions_log_path = os.path.join(out_dir, "predictions_log.csv")
     debug_path = os.path.join(out_dir, "debug_today_schedule.json")
@@ -6551,8 +6556,8 @@ def refresh_live_predictions(
             ratings_df = pd.DataFrame()
 
     if ratings_df is None or ratings_df.empty:
-        logger.error(
-            "PREDICTIONS ERROR no_ratings_available_for_live "
+        logger.warning(
+            "LIVE_REFRESH skipped reason=missing_ratings_cache "
             f"day={target_day} cfg={os.path.abspath(cfg_path)}"
         )
         empty_df = _empty_predictions_df()
@@ -6560,7 +6565,7 @@ def refresh_live_predictions(
         debug_payload = {
             "date": target_day.isoformat(),
             "source": "live_refresh",
-            "reason": "no_ratings_available",
+            "reason": "missing_ratings_cache",
             "base_url": src_base or "",
             "ratings_xlsx_path": os.path.abspath(ratings_xlsx_path),
             "games_used_path": os.path.abspath(games_used_path),
