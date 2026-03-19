@@ -165,8 +165,19 @@ def format_metric(value: object, scale: float = 1.0, suffix: str = "") -> str:
         return "n/a"
 
 
-def render_calibration_chart(calibration_df: pd.DataFrame) -> None:
-    chart_df = calibration_df.copy()
+def render_calibration_chart(chart_df):
+    import streamlit as st
+    import pandas as pd
+
+    # Prevent crash when no data exists
+    if chart_df is None or chart_df.empty:
+        st.info("Calibration data not available yet")
+        return
+
+    if "avg_pred" not in chart_df.columns:
+        st.warning("Calibration data missing expected columns")
+        return
+
     chart_df["avg_pred"] = pd.to_numeric(chart_df["avg_pred"], errors="coerce")
     chart_df["actual_win_rate"] = pd.to_numeric(
         chart_df["actual_win_rate"], errors="coerce"
