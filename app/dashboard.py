@@ -169,44 +169,66 @@ def render_calibration_chart(chart_df):
     import streamlit as st
     import pandas as pd
 
-    # Prevent crash when no data exists
-    if chart_df is None or chart_df.empty:
+    # DEBUG: show what we actually received
+    if chart_df is not None:
+        st.write("Calibration columns:", list(chart_df.columns))
+    else:
+        st.write("Calibration df is None")
+
+    # GUARD 1: no data
+    if chart_df is None or len(chart_df) == 0:
         st.info("Calibration data not available yet")
         return
 
-    if "avg_pred" not in chart_df.columns:
-        st.warning("Calibration data missing expected columns")
+    chart_df = chart_df.copy()
+    if "actual_win_rate" in chart_df.columns and "win_rate" not in chart_df.columns:
+        chart_df["win_rate"] = chart_df["actual_win_rate"]
+
+    # GUARD 2: missing required columns
+    required_cols = ["avg_pred", "win_rate"]
+    missing = [c for c in required_cols if c not in chart_df.columns]
+
+    if missing:
+        st.warning(f"Missing columns: {missing}")
         return
 
+    # SAFE conversion
     chart_df["avg_pred"] = pd.to_numeric(chart_df["avg_pred"], errors="coerce")
-    chart_df["actual_win_rate"] = pd.to_numeric(
-        chart_df["actual_win_rate"], errors="coerce"
-    )
-    chart_df = chart_df.dropna(subset=["avg_pred", "actual_win_rate"])
+    chart_df["win_rate"] = pd.to_numeric(chart_df["win_rate"], errors="coerce")
+    chart_df["actual_win_rate"] = chart_df["win_rate"]
+    chart_df = chart_df.dropna(subset=["avg_pred", "win_rate"])
     if chart_df.empty:
         st.info("No settled predictions available for calibration yet.")
         return
 
     if alt is None:
+        line_chart_df = chart_df.copy()
+        if "bucket" not in line_chart_df.columns:
+            line_chart_df["bucket"] = line_chart_df.index.astype(str)
         st.line_chart(
-            chart_df.set_index("bucket")[["avg_pred", "actual_win_rate"]],
+            line_chart_df.set_index("bucket")[["avg_pred", "win_rate"]],
             use_container_width=True,
         )
         return
 
-    perfect = pd.DataFrame({"avg_pred": [0.0, 1.0], "actual_win_rate": [0.0, 1.0]})
+    if "bucket" not in chart_df.columns:
+        chart_df["bucket"] = chart_df.index.astype(str)
+    if "count" not in chart_df.columns:
+        chart_df["count"] = pd.NA
+
+    perfect = pd.DataFrame({"avg_pred": [0.0, 1.0], "win_rate": [0.0, 1.0]})
     perfect_line = (
         alt.Chart(perfect)
         .mark_line(color="#9aa0a6", strokeDash=[4, 4])
-        .encode(x="avg_pred:Q", y="actual_win_rate:Q")
+        .encode(x="avg_pred:Q", y="win_rate:Q")
     )
     actual_line = (
         alt.Chart(chart_df)
         .mark_line(point=True, color="#1f77b4")
         .encode(
             x=alt.X("avg_pred:Q", title="Average Predicted Win Probability", scale=alt.Scale(domain=[0, 1])),
-            y=alt.Y("actual_win_rate:Q", title="Actual Win Rate", scale=alt.Scale(domain=[0, 1])),
-            tooltip=["bucket", "count", "avg_pred", "actual_win_rate"],
+            y=alt.Y("win_rate:Q", title="Actual Win Rate", scale=alt.Scale(domain=[0, 1])),
+            tooltip=["bucket", "count", "avg_pred", "win_rate"],
         )
     )
     st.altair_chart(perfect_line + actual_line, use_container_width=True)
