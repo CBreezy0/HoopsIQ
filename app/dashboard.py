@@ -25,7 +25,7 @@ if __package__ in {None, ""}:
         compute_metrics_summary,
         load_predictions_log,
     )
-    from app.runtime import OUTPUTS_DIR
+    from app.runtime import OUTPUTS_DIR, bootstrap_live_data_generation, build_public_logger
 else:
     from .dashboard_data import (
         BRACKET_MATCHUP_PROBS_PATH,
@@ -42,12 +42,18 @@ else:
         compute_metrics_summary,
         load_predictions_log,
     )
-    from .runtime import OUTPUTS_DIR
+    from .runtime import OUTPUTS_DIR, bootstrap_live_data_generation, build_public_logger
 
 try:
     import altair as alt
 except Exception:
     alt = None
+
+
+@st.cache_resource(show_spinner=False)
+def bootstrap_live_data() -> dict[str, object]:
+    logger = build_public_logger("dashboard.bootstrap")
+    return bootstrap_live_data_generation(logger=logger)
 
 
 @st.cache_data(show_spinner=False)
@@ -178,6 +184,7 @@ def main() -> None:
     st.set_page_config(page_title="NCAAB Live Dashboard", layout="wide")
     st.title("NCAAB Live Prediction Dashboard")
 
+    bootstrap_status = bootstrap_live_data()
     metrics = load_metrics_summary()
     live_df = load_live_predictions()
     daily_metrics_df = load_daily_metrics_df()
@@ -189,6 +196,8 @@ def main() -> None:
 
     updated_at = metrics.get("updated_at_utc", "unknown")
     st.caption(f"Data root: `{OUTPUTS_DIR}` | Updated: `{updated_at}`")
+    if bootstrap_status.get("ran") and not bootstrap_status.get("ready"):
+        st.warning("Live data bootstrap ran, but some required output files are still missing.")
 
     metric_cols = st.columns(4)
     metric_cols[0].metric("Settled Predictions", str(int(metrics.get("rows_used") or 0)))
