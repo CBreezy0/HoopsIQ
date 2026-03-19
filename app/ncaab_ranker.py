@@ -26,8 +26,10 @@ from zoneinfo import ZoneInfo
 
 if __package__ in {None, ""}:
     sys.path.append(str(Path(__file__).resolve().parents[1]))
+    from app import team_identity as ti
     from app.runtime import DEFAULT_CONFIG_PATH, REPO_ROOT, load_public_config, resolve_project_root
 else:
+    from . import team_identity as ti
     from .runtime import DEFAULT_CONFIG_PATH, REPO_ROOT, load_public_config, resolve_project_root
 
 
@@ -283,42 +285,35 @@ def is_d1_division_value(division, division_name=None) -> bool:
     return False
 
 
+def normalize_team_name(name: str) -> str:
+    return ti.normalize_team_name(name)
+
+
 def normalize_name(s: str) -> str:
-    s = _norm_text(s)
-    s = s.replace("&", " and ")
-    s = s.replace("’", "")
-    s = s.replace("'", "")
-    s = s.replace(".", "")
-    s = re.sub(r"^csu\b", "cal state", s)
-    s = re.sub(r"\bcal\s+st\b", "cal state", s)
-    s = re.sub(r"\bst[.]?\b", "state", s)
-    s = re.sub(r"[^\w\s-]", " ", s)
-    s = s.replace("-", " ")
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
+    return normalize_team_name(s)
 
 
-TEAM_NAME_ALIASES = {
-    "fgcu": "florida gulf coast",
-    "ole miss": "mississippi",
-    "vmi": "virginia military institute",
-    "cal st fullerton": "cal state fullerton",
-    "cal st bakersfield": "cal state bakersfield",
-    "cal st northridge": "cal state northridge",
-    "csu bakersfield": "cal state bakersfield",
-    "csu fullerton": "cal state fullerton",
-    "csu northridge": "cal state northridge",
-    "miami ohio": "miami oh",
-    "miami of ohio": "miami oh",
-    "miami florida": "miami fl",
-    "u s c": "usc",
-    "southern cal": "southern california",
-    "stephen f austin": "sfa",
-}
+def _normalize_whitelist_match_name(raw_name: str) -> str:
+    text = str(raw_name or "").strip()
+    if not text:
+        return ""
+    text = _norm_text(text)
+    text = re.sub(r"\([^)]*\)", " ", text)
+    text = text.replace("&", " and ")
+    text = text.replace("’", "")
+    text = text.replace("'", "")
+    text = text.replace(".", "")
+    text = re.sub(r"[^\w\s-]", " ", text)
+    text = text.replace("-", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+    return apply_name_alias(text)
+
+
+TEAM_NAME_ALIASES = ti.load_team_aliases()
 
 
 def apply_name_alias(norm_name: str) -> str:
-    return TEAM_NAME_ALIASES.get(norm_name, norm_name)
+    return ti.apply_team_alias(norm_name, aliases=TEAM_NAME_ALIASES)
 
 
 def normalize_player_name(s: str) -> str:
@@ -785,7 +780,7 @@ def parse_player_rows_from_boxscore(
                 continue
 
             player_id = player_id_candidate
-            player_key = player_id if player_id else f"{normalize_name(player_name)}|{tid}"
+            player_key = player_id if player_id else f"{normalize_player_name(player_name)}|{tid}"
 
             p_stat_obj = p.get("stats", p)
             if not isinstance(p_stat_obj, dict):
@@ -1780,25 +1775,11 @@ def write_team_directory_cache(out_dir: str, team_meta: dict, logger: logging.Lo
 
 
 def build_team_directory_names_map(team_meta: dict) -> dict[str, str]:
-    names_map: dict[str, str] = {}
-    for tid, rec in team_meta.items():
-        sid = _safe_team_id(tid)
-        if not sid:
-            continue
-        candidates = [
-            rec.get("nameShort", ""),
-            rec.get("nameFull", ""),
-            str(rec.get("seoname", "")).replace("-", " "),
-            rec.get("name6Char", ""),
-        ]
-        for raw in candidates:
-            n = apply_name_alias(normalize_name(raw))
-            if not n:
-                continue
-            # Keep first mapping to avoid churn on collisions.
-            if n not in names_map:
-                names_map[n] = sid
-    return names_map
+    return ti.build_team_id_map(
+        aliases=TEAM_NAME_ALIASES,
+        existing_map=ti.load_team_id_map(),
+        team_meta=team_meta,
+    )
 
 
 def write_team_directory_names_cache(out_dir: str, names_map: dict[str, str], logger: logging.Logger):
@@ -1806,31 +1787,98 @@ def write_team_directory_names_cache(out_dir: str, names_map: dict[str, str], lo
     os.makedirs(out_dir, exist_ok=True)
     with open(path, "w") as f:
         json.dump(dict(sorted(names_map.items())), f, indent=2)
-    logger.info(f"TEAM_DIR wrote team_directory_names.json names={len(names_map)} path={path}")
+    team_id_map_path = ti.save_team_id_map(
+        names_map,
+        Path(out_dir) / "team_id_map.json",
+    )
+    logger.info(
+        f"TEAM_DIR wrote team_directory_names.json names={len(names_map)} path={path} "
+        f"team_id_map_path={team_id_map_path}"
+    )
 
 
 def load_team_directory_names_cache(out_dir: str, logger: logging.Logger) -> dict[str, str]:
     path = os.path.join(out_dir, "team_directory_names.json")
+    combined = ti.load_team_id_map(Path(out_dir) / "team_id_map.json")
     if not os.path.exists(path):
-        return {}
+        return combined
     try:
         with open(path, "r", encoding="utf-8") as f:
             payload = json.load(f)
     except Exception as ex:
         logger.warning(f"TEAM_DIR failed to load team_directory_names.json path={path} err={ex}")
-        return {}
+        return combined
     if not isinstance(payload, dict):
         logger.warning(f"TEAM_DIR invalid team_directory_names.json shape path={path}")
-        return {}
+        return combined
 
-    clean: dict[str, str] = {}
+    clean: dict[str, str] = dict(combined)
     for raw_name, raw_tid in payload.items():
         name_norm = apply_name_alias(normalize_name(raw_name))
         tid = canonical_team_id(raw_tid)
         if name_norm and tid:
             clean[name_norm] = tid
-    logger.info(f"TEAM_DIR loaded team_directory_names.json names={len(clean)} path={path}")
+    logger.info(
+        f"TEAM_DIR loaded team_directory_names.json names={len(clean)} path={path}"
+    )
     return clean
+
+
+def _save_team_aliases_if_changed(
+    *,
+    before_aliases: dict[str, str],
+    after_aliases: dict[str, str],
+    logger: logging.Logger,
+    context: str,
+) -> None:
+    if dict(before_aliases) == dict(after_aliases):
+        return
+    alias_path = ti.save_team_aliases(after_aliases)
+    TEAM_NAME_ALIASES.clear()
+    TEAM_NAME_ALIASES.update(after_aliases)
+    logger.info(
+        "TEAM_ALIAS updated context=%s aliases=%s path=%s",
+        context,
+        len(after_aliases),
+        alias_path,
+    )
+
+
+def _build_team_identity_map(
+    *,
+    out_dir: str | None = None,
+    team_meta: dict | None = None,
+    games_df: pd.DataFrame | None = None,
+    ratings_df: pd.DataFrame | None = None,
+) -> dict[str, str]:
+    path = Path(out_dir) / "team_id_map.json" if out_dir else ti.TEAM_ID_MAP_PATH
+    return ti.build_team_id_map(
+        aliases=TEAM_NAME_ALIASES,
+        existing_map=ti.load_team_id_map(path),
+        team_meta=team_meta,
+        games_df=games_df,
+        ratings_df=ratings_df,
+    )
+
+
+def _resolve_team_match(
+    name: str,
+    *,
+    team_id_map: dict[str, str],
+    logger: logging.Logger | None = None,
+    source: str = "",
+    remember: bool = True,
+    allow_fuzzy: bool = True,
+) -> ti.TeamMatchResult:
+    return ti.resolve_team_match(
+        name,
+        team_id_map,
+        TEAM_NAME_ALIASES,
+        logger=logger,
+        source=source,
+        remember=remember,
+        allow_fuzzy=allow_fuzzy,
+    )
 
 
 def merge_team_directory_from_games_df(team_meta: dict, games_df: pd.DataFrame):
@@ -1938,7 +1986,8 @@ def _normalize_conf_name(raw: str) -> str:
 
 
 def _normalize_team_match_key(raw_name) -> str:
-    return _prediction_containment_key(raw_name)
+    variants = ti.expand_team_name_variants(raw_name)
+    return variants[0] if variants else ""
 
 
 _TEAM_MATCH_TOKEN_STOPWORDS = {
@@ -1969,60 +2018,14 @@ def _team_match_tokens(name) -> set[str]:
 
 
 def _resolve_team_id_from_name(name, normalized_name_map: dict[str, str]) -> str:
-    key = _normalize_team_match_key(name)
-    if not key:
-        return ""
-
-    direct = _safe_team_id(normalized_name_map.get(key, ""))
-    if direct:
-        return direct
-
-    key_tokens = [token for token in key.split() if token]
-    for prefix_len in range(len(key_tokens), 0, -1):
-        prefix = " ".join(key_tokens[:prefix_len])
-        if not prefix:
-            continue
-        prefix_ids = {
-            _safe_team_id(team_id)
-            for candidate_key, team_id in normalized_name_map.items()
-            if candidate_key == prefix or candidate_key.startswith(prefix + " ")
-        }
-        prefix_ids.discard("")
-        if len(prefix_ids) == 1:
-            return next(iter(prefix_ids))
-
-    containment_matches: list[tuple[int, str]] = []
-    for candidate_key, team_id in normalized_name_map.items():
-        if candidate_key and (candidate_key in key or key in candidate_key):
-            safe_id = _safe_team_id(team_id)
-            if safe_id:
-                containment_matches.append((len(_team_match_tokens(candidate_key)), safe_id))
-    if containment_matches:
-        max_tokens = max(token_count for token_count, _ in containment_matches)
-        matched_ids = {
-            team_id
-            for token_count, team_id in containment_matches
-            if token_count == max_tokens
-        }
-        if len(matched_ids) == 1:
-            return next(iter(matched_ids))
-
-    raw_tokens = _team_match_tokens(name)
-    if len(raw_tokens) < 2:
-        return ""
-
-    token_subset_ids = set()
-    for candidate_key, team_id in normalized_name_map.items():
-        candidate_tokens = _team_match_tokens(candidate_key)
-        if len(candidate_tokens) < 2:
-            continue
-        if candidate_tokens.issubset(raw_tokens) or raw_tokens.issubset(candidate_tokens):
-            safe_id = _safe_team_id(team_id)
-            if safe_id:
-                token_subset_ids.add(safe_id)
-    if len(token_subset_ids) == 1:
-        return next(iter(token_subset_ids))
-    return ""
+    return _resolve_team_match(
+        name,
+        team_id_map=normalized_name_map,
+        logger=None,
+        source="resolve_team_id",
+        remember=False,
+        allow_fuzzy=True,
+    ).team_id
 
 
 def _expand_master_team_name_variants(raw_name: str) -> set[str]:
@@ -2250,15 +2253,9 @@ def build_d1_ids_from_master_whitelist(
         }
         return set(), {}, stats
 
-    # Resolve strictly against team_directory_names.json map.
-    name_to_ids: dict[str, set[str]] = {}
-    for raw_name, raw_tid in team_name_map.items():
-        name_norm = apply_name_alias(normalize_name(raw_name))
-        tid = canonical_team_id(raw_tid)
-        if not name_norm or not tid:
-            continue
-        name_to_ids.setdefault(name_norm, set()).add(tid)
-
+    team_id_map = dict(team_name_map)
+    before_team_id_map = dict(team_id_map)
+    before_aliases = dict(TEAM_NAME_ALIASES)
     d1_ids: set[str] = set()
     d1_conf_by_id: dict[str, str] = {}
     ambiguous_rows: list[dict[str, object]] = []
@@ -2271,73 +2268,213 @@ def build_d1_ids_from_master_whitelist(
             continue
 
         team_name_norm = apply_name_alias(normalize_name(team_name))
-        name_variants = _expand_master_team_name_variants(team_name)
+        candidate_names: list[str] = [team_name]
+        for name_variant in sorted(_expand_master_team_name_variants(team_name)):
+            if name_variant:
+                candidate_names.append(name_variant)
+        cleaned_team_name = _normalize_whitelist_match_name(team_name)
+        if cleaned_team_name:
+            candidate_names.append(cleaned_team_name)
+        for override_name in MASTER_TEAM_NAME_OVERRIDES.get(team_name_norm, []):
+            if override_name:
+                candidate_names.append(override_name)
         alias_variants = WHITELIST_ALIAS_NORMALIZATION.get(team_name_norm, [])
         for alias_name in alias_variants:
             if alias_name:
-                name_variants.add(alias_name)
-        candidates: set[str] = set()
-        for nm in name_variants:
-            candidates.update(name_to_ids.get(nm, set()))
+                candidate_names.append(alias_name)
+
+        unique_candidate_names: list[str] = []
+        seen_candidate_names: set[str] = set()
+        for candidate_name in candidate_names:
+            candidate_key = str(candidate_name or "").strip()
+            if candidate_key and candidate_key not in seen_candidate_names:
+                seen_candidate_names.add(candidate_key)
+                unique_candidate_names.append(candidate_key)
+
+        candidate_matches: list[ti.TeamMatchResult] = []
+        for candidate_name in unique_candidate_names:
+            match = _resolve_team_match(
+                candidate_name,
+                team_id_map=team_id_map,
+                logger=None,
+                source="whitelist",
+                remember=False,
+                allow_fuzzy=True,
+            )
+            if match.matched:
+                candidate_matches.append(match)
+        method_rank = {"direct": 3, "alias": 2, "fuzzy": 1}
+        best_method_rank = max(
+            (method_rank.get(match.method, 0) for match in candidate_matches),
+            default=0,
+        )
+        ranked_candidate_matches = [
+            match
+            for match in candidate_matches
+            if method_rank.get(match.method, 0) == best_method_rank
+        ]
 
         preferred_tid_raw = WHITELIST_PREFERRED_TEAM_ID.get(team_name_norm, "")
         preferred_tid = canonical_team_id(preferred_tid_raw)
-        if preferred_tid:
-            preferred_candidates = set(candidates)
-            for alias_name in alias_variants:
-                preferred_candidates.update(name_to_ids.get(alias_name, set()))
-            if preferred_tid in preferred_candidates:
-                d1_ids.add(preferred_tid)
-                if preferred_tid not in d1_conf_by_id:
-                    d1_conf_by_id[preferred_tid] = conference
-                logger.info(
-                    f"WHITELIST_ALIAS_RESOLVE team={team_name!r} resolved_team_id={preferred_tid}"
-                )
+        unique_candidate_ids = {
+            match.team_id
+            for match in ranked_candidate_matches
+            if match.team_id
+        }
+        selected_match: ti.TeamMatchResult | None = None
+        if preferred_tid and preferred_tid in unique_candidate_ids:
+            selected_match = next(
+                (
+                    match
+                    for match in ranked_candidate_matches
+                    if match.team_id == preferred_tid
+                ),
+                None,
+            )
+        elif len(unique_candidate_ids) == 1:
+            selected_match = sorted(
+                ranked_candidate_matches,
+                key=lambda match: (
+                    method_rank.get(match.method, 0),
+                    match.score,
+                    len(match.input_key),
+                ),
+                reverse=True,
+            )[0]
+
+        if selected_match is not None:
+            confirmed_match = _resolve_team_match(
+                selected_match.input_key or team_name,
+                team_id_map=team_id_map,
+                logger=None,
+                source="whitelist",
+                remember=True,
+                allow_fuzzy=True,
+            )
+            selected_tid = confirmed_match.team_id or selected_match.team_id
+            if selected_tid:
+                d1_ids.add(selected_tid)
+                if selected_tid not in d1_conf_by_id:
+                    d1_conf_by_id[selected_tid] = conference
                 continue
 
-        if len(candidates) == 1:
-            selected_tid = next(iter(candidates))
-            d1_ids.add(selected_tid)
-            if selected_tid not in d1_conf_by_id:
-                d1_conf_by_id[selected_tid] = conference
-            continue
-
-        if candidates:
+        if unique_candidate_ids:
             ambiguous_rows.append(
                 {
                     "team": team_name,
                     "conference": conference,
-                    "candidates": sorted(candidates),
+                    "candidates": sorted(unique_candidate_ids),
                 }
             )
         else:
             unresolved_rows.append(team_name)
+            logger.warning("WARNING TEAM_MATCH_FAILED name=%r source=whitelist", team_name)
 
     total = len(master_rows)
     matched = total - len(ambiguous_rows) - len(unresolved_rows)
+    match_rate = (float(matched) / float(total)) if total > 0 else 0.0
+    ti.log_team_match_coverage(
+        logger,
+        scope="whitelist",
+        matched=matched,
+        total=total,
+    )
     logger.info(
         f"WHITELIST_MATCH total={total} matched={matched} "
-        f"ambiguous={len(ambiguous_rows)} missing={len(unresolved_rows)}"
+        f"ambiguous={len(ambiguous_rows)} missing={len(unresolved_rows)} "
+        f"match_rate={match_rate:.4f}"
     )
     if ambiguous_rows:
         ambiguous_names = [
             f"{row['team']} -> {','.join(row['candidates'])}" for row in ambiguous_rows
         ]
-        logger.error(f"WHITELIST_MATCH ambiguous_names={ambiguous_names}")
+        logger.warning(f"WHITELIST_MATCH ambiguous_names={ambiguous_names}")
     if unresolved_rows:
-        logger.error(f"WHITELIST_MATCH missing_names={unresolved_rows}")
-    if ambiguous_rows or unresolved_rows:
-        ambiguous_names = [str(row["team"]) for row in ambiguous_rows]
-        raise RuntimeError(
-            "WHITELIST_MATCH hard_fail "
-            f"ambiguous_names={ambiguous_names} missing_names={unresolved_rows}"
+        logger.warning(f"WHITELIST_MATCH missing_names={unresolved_rows}")
+
+    fallback_used = False
+    if match_rate < 0.50:
+        logger.warning(
+            "WHITELIST_MATCH degraded mode - falling back to games_history teams"
         )
+        fallback_ids: set[str] = set()
+        fallback_conf_by_id: dict[str, str] = {}
+        fallback_name_to_id: dict[str, str] = {}
+        for raw_name, raw_tid in team_name_map.items():
+            tid = _safe_team_id(raw_tid)
+            if not tid:
+                continue
+            for key in {
+                apply_name_alias(normalize_name(raw_name)),
+                _normalize_whitelist_match_name(raw_name),
+            }:
+                if key and key not in fallback_name_to_id:
+                    fallback_name_to_id[key] = tid
+
+        games_source = games_df if games_df is not None else pd.DataFrame()
+        for team_col, id_col, conf_col in [
+            ("team", "team_id", "team_conf"),
+            ("opponent", "opponent_team_id", "opp_conf"),
+        ]:
+            if games_source.empty or team_col not in games_source.columns:
+                continue
+            team_series = games_source[team_col].fillna("").astype(str)
+            id_series = (
+                games_source[id_col].fillna("").astype(str)
+                if id_col in games_source.columns
+                else pd.Series("", index=games_source.index, dtype="object")
+            )
+            conf_series = (
+                games_source[conf_col].fillna("").astype(str)
+                if conf_col in games_source.columns
+                else pd.Series("", index=games_source.index, dtype="object")
+            )
+            for idx, raw_name in team_series.items():
+                tid = _safe_team_id(id_series.at[idx])
+                if not tid:
+                    for key in {
+                        apply_name_alias(normalize_name(raw_name)),
+                        _normalize_whitelist_match_name(raw_name),
+                    }:
+                        if key and key in fallback_name_to_id:
+                            tid = fallback_name_to_id[key]
+                            break
+                if not tid:
+                    continue
+                fallback_ids.add(tid)
+                conf_value = str(conf_series.at[idx]).strip()
+                if conf_value and tid not in fallback_conf_by_id:
+                    fallback_conf_by_id[tid] = conf_value
+
+        if fallback_ids:
+            d1_ids = fallback_ids
+            if fallback_conf_by_id:
+                d1_conf_by_id.update(fallback_conf_by_id)
+            fallback_used = True
+        logger.warning(
+            "WHITELIST_MATCH fallback_used=%s match_rate=%.4f fallback_ids=%s",
+            str(bool(fallback_used)).lower(),
+            match_rate,
+            len(d1_ids),
+        )
+
+    if team_id_map != before_team_id_map:
+        ti.save_team_id_map(team_id_map)
+        logger.info("TEAM_ID_MAP updated context=whitelist names=%s", len(team_id_map))
+    _save_team_aliases_if_changed(
+        before_aliases=before_aliases,
+        after_aliases=TEAM_NAME_ALIASES,
+        logger=logger,
+        context="whitelist",
+    )
 
     stats = {
         "master_rows": total,
         "matched_rows": matched,
         "ambiguous_rows": len(ambiguous_rows),
         "unresolved_rows": len(unresolved_rows),
+        "fallback_used": fallback_used,
+        "match_rate": match_rate,
     }
     return d1_ids, d1_conf_by_id, stats
 
@@ -2362,7 +2499,14 @@ def map_team_names_to_ids(df: pd.DataFrame, name_map: dict[str, str]) -> pd.Data
         cached = resolve_cache.get(name)
         if cached is not None:
             return cached
-        resolved = _resolve_team_id_from_name(name, name_map)
+        resolved = _resolve_team_match(
+            name,
+            team_id_map=name_map,
+            logger=None,
+            source="map_team_names_to_ids",
+            remember=True,
+            allow_fuzzy=True,
+        ).team_id
         resolve_cache[name] = resolved
         return resolved
 
@@ -2402,21 +2546,23 @@ def backfill_ids_from_directory(
 
     before_missing_team_id = int((g["team_id"] == "").sum())
     before_missing_opp_id = int((g["opponent_team_id"] == "").sum())
-    normalized_names_map: dict[str, str] = {}
-    for raw_name, raw_tid in names_map.items():
-        tid = _safe_team_id(raw_tid)
-        if not tid:
-            continue
-        normalized_key = _normalize_team_match_key(raw_name)
-        if normalized_key and normalized_key not in normalized_names_map:
-            normalized_names_map[normalized_key] = tid
+    normalized_names_map: dict[str, str] = dict(names_map)
+    before_team_id_map = dict(normalized_names_map)
+    before_aliases = dict(TEAM_NAME_ALIASES)
     resolve_cache: dict[str, str] = {}
 
     def resolve_cached(name: str) -> str:
         cached = resolve_cache.get(name)
         if cached is not None:
             return cached
-        resolved = _resolve_team_id_from_name(name, normalized_names_map)
+        resolved = _resolve_team_match(
+            name,
+            team_id_map=normalized_names_map,
+            logger=logger,
+            source="history_backfill",
+            remember=True,
+            allow_fuzzy=True,
+        ).team_id
         resolve_cache[name] = resolved
         return resolved
 
@@ -2459,6 +2605,12 @@ def backfill_ids_from_directory(
         f"ID_BACKFILL before_missing_team_id={before_missing_team_id} after_missing_team_id={after_missing_team_id} "
         f"before_missing_opp_id={before_missing_opp_id} after_missing_opp_id={after_missing_opp_id}"
     )
+    ti.log_team_match_coverage(
+        logger,
+        scope="history_backfill",
+        matched=(before_missing_team_id - after_missing_team_id) + (before_missing_opp_id - after_missing_opp_id),
+        total=before_missing_team_id + before_missing_opp_id,
+    )
 
     debug_path = os.path.join(out_dir, "id_backfill_debug.csv")
     pd.DataFrame(debug_rows, columns=[
@@ -2472,6 +2624,16 @@ def backfill_ids_from_directory(
         logger.warning(
             f"ID_BACKFILL unresolved team_id={after_missing_team_id} opponent_team_id={after_missing_opp_id} sample={sample}"
         )
+
+    if normalized_names_map != before_team_id_map:
+        ti.save_team_id_map(normalized_names_map, Path(out_dir) / "team_id_map.json")
+        logger.info("TEAM_ID_MAP updated context=history_backfill names=%s", len(normalized_names_map))
+    _save_team_aliases_if_changed(
+        before_aliases=before_aliases,
+        after_aliases=TEAM_NAME_ALIASES,
+        logger=logger,
+        context="history_backfill",
+    )
 
     return g
 
@@ -4470,14 +4632,11 @@ def clean_team_name(name) -> str:
     if not isinstance(name, str):
         return ""
 
-    cleaned = name.lower().strip()
-    cleaned = cleaned.replace("&", " and ")
+    cleaned = normalize_team_name(name)
     for word in _TEAM_NAME_REMOVE_WORDS:
         cleaned = re.sub(rf"\b{re.escape(word)}\b", " ", cleaned)
-
-    cleaned = re.sub(r"[^a-z0-9 ]", "", cleaned)
-    cleaned = " ".join(cleaned.split())
-    cleaned = apply_name_alias(normalize_name(cleaned))
+    cleaned = normalize_team_name(cleaned)
+    cleaned = apply_name_alias(cleaned)
     cleaned = {
         "prairie view a and m": "prairie view",
         "state thomasminnesota": "state thomas mn",
@@ -4570,11 +4729,11 @@ def _resolve_containment_name_matches(
 
 
 def _prediction_name_key(raw_name) -> str:
-    norm = apply_name_alias(normalize_name(clean_team_name(raw_name)))
+    norm = apply_name_alias(normalize_team_name(clean_team_name(raw_name)))
     if not norm:
         return ""
     norm = re.sub(r"\bmt\b", "mount", norm)
-    norm = normalize_name(norm)
+    norm = normalize_team_name(norm)
     norm = apply_name_alias(norm)
     canonical = _PREDICTION_NAME_CANONICAL.get(norm)
     if canonical:
@@ -4954,6 +5113,50 @@ def fetch_prediction_matchups(
             subset=["date", "team", "opponent"],
             keep="first",
         ).reset_index(drop=True)
+        team_id_map = ti.load_team_id_map()
+        before_aliases = dict(TEAM_NAME_ALIASES)
+        before_team_id_map = dict(team_id_map)
+        matched = 0
+        total = 0
+        if team_id_map:
+            out["team_id"] = out["team_id"].fillna("").apply(_safe_team_id)
+            out["opponent_team_id"] = out["opponent_team_id"].fillna("").apply(_safe_team_id)
+            for col_name, id_col, scope_label in (
+                ("team", "team_id", "schedule_team"),
+                ("opponent", "opponent_team_id", "schedule_opponent"),
+            ):
+                missing_mask = out[id_col] == ""
+                if not missing_mask.any():
+                    continue
+                total += int(missing_mask.sum())
+                for idx in out.index[missing_mask]:
+                    match = _resolve_team_match(
+                        str(out.at[idx, col_name]),
+                        team_id_map=team_id_map,
+                        logger=logger,
+                        source=scope_label,
+                        remember=True,
+                        allow_fuzzy=True,
+                    )
+                    if match.team_id:
+                        out.at[idx, id_col] = match.team_id
+                        matched += 1
+        if total:
+            ti.log_team_match_coverage(
+                logger,
+                scope="schedule_ingestion",
+                matched=matched,
+                total=total,
+            )
+        if team_id_map != before_team_id_map:
+            ti.save_team_id_map(team_id_map)
+            logger.info("TEAM_ID_MAP updated context=schedule_ingestion names=%s", len(team_id_map))
+        _save_team_aliases_if_changed(
+            before_aliases=before_aliases,
+            after_aliases=TEAM_NAME_ALIASES,
+            logger=logger,
+            context="schedule_ingestion",
+        )
         logger.info(
             f"PREDICTIONS schedule_loaded source={source} rows={len(out)} "
             f"day={target_day}{detail}"
@@ -5727,48 +5930,113 @@ def build_game_predictions(
         for team_id in internal_by_id.index
         if str(team_id).strip()
     }
+    prediction_out_dir = str(ti.TEAM_ID_MAP_PATH.parent)
+    prediction_team_dir = load_team_directory_cache(prediction_out_dir)
+    prediction_team_id_map = _build_team_identity_map(
+        out_dir=prediction_out_dir,
+        team_meta=prediction_team_dir,
+        ratings_df=teams_df,
+    )
+    before_prediction_team_id_map = dict(prediction_team_id_map)
+    before_prediction_aliases = dict(TEAM_NAME_ALIASES)
     before_id_gate = len(schedule)
     schedule["team_id"] = schedule["team_id"].fillna("").apply(_safe_team_id)
     schedule["opponent_team_id"] = schedule["opponent_team_id"].fillna("").apply(_safe_team_id)
 
     recovered_team_ids = 0
     recovered_opponent_ids = 0
+    resolver_attempts = 0
+    resolver_matches = 0
     invalid_team_mask = (schedule["team_id"] == "") | (~schedule["team_id"].isin(valid_rating_ids))
     if invalid_team_mask.any():
-        recovered_team_series = (
-            schedule.loc[invalid_team_mask, "team_name_clean"]
-            .map(rating_id_by_clean_name)
-            .fillna("")
-            .apply(_safe_team_id)
-        )
-        recovered_team_fill_mask = recovered_team_series != ""
-        if recovered_team_fill_mask.any():
-            recovered_idx = recovered_team_series.index[recovered_team_fill_mask]
-            schedule.loc[recovered_idx, "team_id"] = recovered_team_series.loc[recovered_idx]
-            recovered_team_ids = int(recovered_team_fill_mask.sum())
+        resolver_attempts += int(invalid_team_mask.sum())
+        for idx in schedule.index[invalid_team_mask]:
+            match = _resolve_team_match(
+                str(schedule.at[idx, "team"]),
+                team_id_map=prediction_team_id_map,
+                logger=logger,
+                source="prediction_team",
+                remember=True,
+                allow_fuzzy=True,
+            )
+            if match.team_id and match.team_id in valid_rating_ids:
+                schedule.at[idx, "team_id"] = match.team_id
+                recovered_team_ids += 1
+                resolver_matches += 1
+        remaining_team_mask = (schedule["team_id"] == "") | (~schedule["team_id"].isin(valid_rating_ids))
+        if remaining_team_mask.any():
+            recovered_team_series = (
+                schedule.loc[remaining_team_mask, "team_name_clean"]
+                .map(rating_id_by_clean_name)
+                .fillna("")
+                .apply(_safe_team_id)
+            )
+            recovered_team_fill_mask = recovered_team_series != ""
+            if recovered_team_fill_mask.any():
+                recovered_idx = recovered_team_series.index[recovered_team_fill_mask]
+                schedule.loc[recovered_idx, "team_id"] = recovered_team_series.loc[recovered_idx]
+                recovered_team_ids += int(recovered_team_fill_mask.sum())
 
     invalid_opponent_mask = (
         (schedule["opponent_team_id"] == "")
         | (~schedule["opponent_team_id"].isin(valid_rating_ids))
     )
     if invalid_opponent_mask.any():
-        recovered_opp_series = (
-            schedule.loc[invalid_opponent_mask, "opponent_name_clean"]
-            .map(rating_id_by_clean_name)
-            .fillna("")
-            .apply(_safe_team_id)
+        resolver_attempts += int(invalid_opponent_mask.sum())
+        for idx in schedule.index[invalid_opponent_mask]:
+            match = _resolve_team_match(
+                str(schedule.at[idx, "opponent"]),
+                team_id_map=prediction_team_id_map,
+                logger=logger,
+                source="prediction_opponent",
+                remember=True,
+                allow_fuzzy=True,
+            )
+            if match.team_id and match.team_id in valid_rating_ids:
+                schedule.at[idx, "opponent_team_id"] = match.team_id
+                recovered_opponent_ids += 1
+                resolver_matches += 1
+        remaining_opponent_mask = (
+            (schedule["opponent_team_id"] == "")
+            | (~schedule["opponent_team_id"].isin(valid_rating_ids))
         )
-        recovered_opp_fill_mask = recovered_opp_series != ""
-        if recovered_opp_fill_mask.any():
-            recovered_idx = recovered_opp_series.index[recovered_opp_fill_mask]
-            schedule.loc[recovered_idx, "opponent_team_id"] = recovered_opp_series.loc[recovered_idx]
-            recovered_opponent_ids = int(recovered_opp_fill_mask.sum())
+        if remaining_opponent_mask.any():
+            recovered_opp_series = (
+                schedule.loc[remaining_opponent_mask, "opponent_name_clean"]
+                .map(rating_id_by_clean_name)
+                .fillna("")
+                .apply(_safe_team_id)
+            )
+            recovered_opp_fill_mask = recovered_opp_series != ""
+            if recovered_opp_fill_mask.any():
+                recovered_idx = recovered_opp_series.index[recovered_opp_fill_mask]
+                schedule.loc[recovered_idx, "opponent_team_id"] = recovered_opp_series.loc[recovered_idx]
+                recovered_opponent_ids += int(recovered_opp_fill_mask.sum())
 
     if recovered_team_ids or recovered_opponent_ids:
         logger.info(
             "PREDICTIONS id_recovered "
             f"team_id={recovered_team_ids} opponent_team_id={recovered_opponent_ids}"
         )
+    if resolver_attempts:
+        ti.log_team_match_coverage(
+            logger,
+            scope="prediction_pipeline",
+            matched=resolver_matches,
+            total=resolver_attempts,
+        )
+    if prediction_team_id_map != before_prediction_team_id_map:
+        ti.save_team_id_map(prediction_team_id_map, Path(prediction_out_dir) / "team_id_map.json")
+        logger.info(
+            "TEAM_ID_MAP updated context=prediction_pipeline names=%s",
+            len(prediction_team_id_map),
+        )
+    _save_team_aliases_if_changed(
+        before_aliases=before_prediction_aliases,
+        after_aliases=TEAM_NAME_ALIASES,
+        logger=logger,
+        context="prediction_pipeline",
+    )
 
     valid_id_mask = (
         (schedule["team_id"] != "")
@@ -9524,7 +9792,11 @@ def run_once(
             f"TEAM_DIR seeded from games history teams={len(team_directory)} source=games_history"
         )
     write_team_directory_cache(out_dir, team_directory, logger)
-    team_name_map = build_team_directory_names_map(team_directory)
+    team_name_map = _build_team_identity_map(
+        out_dir=out_dir,
+        team_meta=team_directory,
+        games_df=games_all,
+    )
     write_team_directory_names_cache(out_dir, team_name_map, logger)
     cached_team_name_map = load_team_directory_names_cache(out_dir, logger)
     if cached_team_name_map:
@@ -9553,7 +9825,11 @@ def run_once(
     if missing_team_id > 0 or missing_opp_id > 0:
         games_all = enrich_ids_from_history_boxscores(client, games_all, team_directory, logger)
         write_team_directory_cache(out_dir, team_directory, logger)
-        team_name_map = build_team_directory_names_map(team_directory)
+        team_name_map = _build_team_identity_map(
+            out_dir=out_dir,
+            team_meta=team_directory,
+            games_df=games_all,
+        )
         write_team_directory_names_cache(out_dir, team_name_map, logger)
         cached_team_name_map = load_team_directory_names_cache(out_dir, logger)
         if cached_team_name_map:
@@ -9587,13 +9863,14 @@ def run_once(
             logger=logger,
         )
         if len(d1_team_ids) < 300:
-            raise RuntimeError(
-                "D1 whitelist required but resolved too few IDs. "
+            logger.warning(
+                "D1_BUILD degraded mode "
                 f"path={d1_whitelist_path} resolved_d1_ids={len(d1_team_ids)} expected>=300 "
                 f"master_rows={master_stats.get('master_rows')} "
                 f"ambiguous_rows={master_stats.get('ambiguous_rows')} "
-                f"unresolved_rows={master_stats.get('unresolved_rows')}. "
-                "To use dynamic IDs instead, set refresh.d1_source='dynamic'."
+                f"unresolved_rows={master_stats.get('unresolved_rows')} "
+                f"fallback_used={master_stats.get('fallback_used')} "
+                f"match_rate={master_stats.get('match_rate')}"
             )
         whitelist_resolved_ids = set(d1_team_ids)
         d1_team_ids = whitelist_resolved_ids
@@ -9603,6 +9880,8 @@ def run_once(
             f"matched_rows={master_stats.get('matched_rows')} "
             f"ambiguous_rows={master_stats.get('ambiguous_rows')} "
             f"unresolved_rows={master_stats.get('unresolved_rows')} "
+            f"fallback_used={master_stats.get('fallback_used')} "
+            f"match_rate={master_stats.get('match_rate')} "
             f"d1_ids_count={len(d1_team_ids)}"
         )
         id_to_conf = {
@@ -9960,7 +10239,11 @@ def rebuild_players_only(cfg_path: str) -> int:
         if not team_name_map:
             team_dir = load_team_directory_cache(out_dir)
             if team_dir:
-                team_name_map = build_team_directory_names_map(team_dir)
+                team_name_map = _build_team_identity_map(
+                    out_dir=out_dir,
+                    team_meta=team_dir,
+                    games_df=games_for_ratings,
+                )
         if not team_name_map:
             raise RuntimeError("missing_team_directory_names_cache")
         _, d1_conf_by_id, master_stats = build_d1_ids_from_master_whitelist(

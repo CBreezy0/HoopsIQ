@@ -14,9 +14,11 @@ import pandas as pd
 if __package__ in {None, ""}:
     sys.path.append(str(Path(__file__).resolve().parents[1]))
     from app import ncaab_ranker as nr
+    from app import team_identity as ti
     from app.runtime import DEFAULT_CONFIG_PATH, OUTPUTS_DIR, REPO_ROOT, build_public_logger
 else:
     from . import ncaab_ranker as nr
+    from . import team_identity as ti
     from .runtime import DEFAULT_CONFIG_PATH, OUTPUTS_DIR, REPO_ROOT, build_public_logger
 
 try:
@@ -89,12 +91,6 @@ ROUND_UPSET_BONUS = {
     (5, 12): 0.040,
 }
 SEED_LINE_PATTERN = re.compile(r"^(?P<seed>\d{1,2})\s*(?P<team>.+?)\s*\((?P<record>\d+-\d+)\)$")
-BRACKET_TEAM_ALIASES = {
-    "miami fl": "miami hurricanes",
-    "queens nc": "queens university royals",
-    "cal baptist": "california baptist lancers",
-    "penn": "pennsylvania quakers",
-}
 SCHOOL_QUALIFIER_TOKENS = {
     "a",
     "and",
@@ -295,40 +291,66 @@ def _build_ratings_lookup(ratings_df: pd.DataFrame) -> pd.DataFrame:
     lookup["rating_team_lower"] = lookup["rating_team"].str.lower()
     lookup["team_tokens"] = lookup["team_clean"].apply(lambda value: tuple(str(value).split()))
     lookup["rating_games"] = pd.to_numeric(lookup.get("Games", 0), errors="coerce").fillna(0.0)
-    lookup = lookup[(lookup["rating_team"] != "") & (lookup["rating_team_id"] != "")].copy()
+    lookup = lookup[lookup["rating_team"] != ""].copy()
     return lookup
 
 
-def _resolve_bracket_team(team_name: str, ratings_lookup: pd.DataFrame) -> pd.Series:
+def _build_bracket_team_id_map(ratings_df: pd.DataFrame) -> dict[str, str]:
+    team_dir = nr.load_team_directory_cache(str(OUTPUTS_DIR))
+    return ti.build_team_id_map(
+        aliases=ti.load_team_aliases(),
+        existing_map=ti.load_team_id_map(OUTPUTS_DIR / "team_id_map.json"),
+        team_meta=team_dir,
+        ratings_df=ratings_df,
+    )
+
+
+def _resolve_bracket_team(
+    team_name: str,
+    ratings_lookup: pd.DataFrame,
+    team_id_map: dict[str, str],
+    aliases: dict[str, str],
+    logger: logging.Logger,
+) -> pd.Series:
+    raw_name = str(team_name).strip().lower()
     clean_name = nr.clean_team_name(team_name)
     team_key = nr._prediction_name_key(team_name)
-    if not clean_name:
-        raise KeyError(f"Unable to resolve blank bracket team name from {team_name!r}")
 
-    raw_name = str(team_name).strip().lower()
-    exact_raw = ratings_lookup.loc[ratings_lookup["rating_team_lower"] == raw_name]
-    if len(exact_raw) == 1:
-        return exact_raw.iloc[0]
+    match = ti.resolve_team_match(
+        team_name,
+        team_id_map,
+        aliases,
+        logger=None,
+        source="bracket",
+        remember=True,
+        allow_fuzzy=True,
+    )
+    if not match.team_id:
+        exact_raw = ratings_lookup.loc[ratings_lookup["rating_team_lower"] == raw_name]
+        if len(exact_raw) == 1:
+            return exact_raw.iloc[0]
+        exact_clean = ratings_lookup.loc[ratings_lookup["team_clean"] == clean_name]
+        if len(exact_clean) == 1:
+            return exact_clean.iloc[0]
+        exact_key = ratings_lookup.loc[ratings_lookup["team_key"] == team_key]
+        if len(exact_key) == 1:
+            return exact_key.iloc[0]
+    else:
+        id_match = ratings_lookup.loc[ratings_lookup["rating_team_id"] == match.team_id]
+        if len(id_match) == 1:
+            return id_match.iloc[0]
 
-    exact_clean = ratings_lookup.loc[ratings_lookup["team_clean"] == clean_name]
-    if len(exact_clean) == 1:
-        return exact_clean.iloc[0]
+        exact_key = ratings_lookup.loc[ratings_lookup["team_key"] == team_key]
+        if len(exact_key) == 1:
+            return exact_key.iloc[0]
 
-    exact_key = ratings_lookup.loc[ratings_lookup["team_key"] == team_key]
-    if len(exact_key) == 1:
-        return exact_key.iloc[0]
+        exact_clean = ratings_lookup.loc[ratings_lookup["team_clean"] == clean_name]
+        if len(exact_clean) == 1:
+            return exact_clean.iloc[0]
 
-    alias_target = BRACKET_TEAM_ALIASES.get(clean_name, "")
-    if alias_target:
-        alias_clean = nr.clean_team_name(alias_target)
-        alias_key = nr._prediction_name_key(alias_target)
-        alias_match = ratings_lookup.loc[
-            (ratings_lookup["team_clean"] == alias_clean)
-            | (ratings_lookup["team_key"] == alias_key)
-            | (ratings_lookup["rating_team_lower"] == alias_target.lower())
-        ]
-        if len(alias_match) == 1:
-            return alias_match.iloc[0]
+        exact_raw = ratings_lookup.loc[ratings_lookup["rating_team_lower"] == raw_name]
+        if len(exact_raw) == 1:
+            return exact_raw.iloc[0]
 
     query_tokens = tuple(token for token in clean_name.split() if token)
     prefix_candidates: list[tuple[int, int, float, int, str, int]] = []
@@ -369,7 +391,9 @@ def _resolve_bracket_team(team_name: str, ratings_lookup: pd.DataFrame) -> pd.Se
         if len(containment_df) == 1:
             return containment_df.iloc[0]
 
-    raise KeyError(f"Unable to resolve bracket team {team_name!r} (clean={clean_name!r})")
+    raise KeyError(
+        f"Unable to map bracket team {team_name!r} to ratings row after team_id={match.team_id}"
+    )
 
 
 def map_bracket_teams_to_ratings(
@@ -379,14 +403,26 @@ def map_bracket_teams_to_ratings(
 ) -> pd.DataFrame:
     logger = build_logger() if logger is None else logger
     ratings_lookup = _build_ratings_lookup(ratings_df)
+    aliases = ti.load_team_aliases()
+    team_id_map = _build_bracket_team_id_map(ratings_df)
+    before_team_id_map = dict(team_id_map)
+    before_aliases = dict(aliases)
 
-    unique_teams = sorted({str(team).strip() for team in bracket_df["team"].dropna().astype(str)})
+    unique_teams = sorted(
+        {
+            str(team).strip()
+            for column in ("team", "opponent")
+            if column in bracket_df.columns
+            for team in bracket_df[column].dropna().astype(str)
+            if str(team).strip()
+        }
+    )
     resolved_rows: list[dict[str, object]] = []
     failures: list[str] = []
 
     for team in unique_teams:
         try:
-            match = _resolve_bracket_team(team, ratings_lookup)
+            match = _resolve_bracket_team(team, ratings_lookup, team_id_map, aliases, logger)
         except Exception:
             failures.append(team)
             continue
@@ -399,6 +435,19 @@ def map_bracket_teams_to_ratings(
                 "rating_team_key": str(match["team_key"]),
             }
         )
+
+    ti.log_team_match_coverage(
+        logger,
+        scope="bracket",
+        matched=len(unique_teams) - len(failures),
+        total=len(unique_teams),
+    )
+    if team_id_map != before_team_id_map:
+        ti.save_team_id_map(team_id_map, OUTPUTS_DIR / "team_id_map.json")
+        logger.info("TEAM_ID_MAP updated context=bracket names=%s", len(team_id_map))
+    if aliases != before_aliases:
+        alias_path = ti.save_team_aliases(aliases)
+        logger.info("TEAM_ALIAS updated context=bracket aliases=%s path=%s", len(aliases), alias_path)
 
     if failures:
         raise RuntimeError(f"Failed to map bracket teams to ratings: {sorted(failures)}")
