@@ -20,6 +20,7 @@ LOGS_DIR = REPO_ROOT / "logs"
 DEFAULT_CONFIG_PATH = CONFIG_DIR / "config.json"
 
 _CONFIG_CACHE: dict[Path, dict] = {}
+RATINGS_OUTPUT_PATH = OUTPUTS_DIR / "teams_power_full.xlsx"
 LIVE_REQUIRED_OUTPUTS = (
     OUTPUTS_DIR / "game_predictions.csv",
     OUTPUTS_DIR / "predictions_log.csv",
@@ -99,6 +100,23 @@ def _csv_has_data_rows(path: Path) -> bool:
     return False
 
 
+def _file_exists_with_content(path: Path) -> bool:
+    if not path.exists() or not path.is_file():
+        return False
+    try:
+        return path.stat().st_size > 0
+    except Exception:
+        return False
+
+
+def ratings_output_status() -> dict[str, object]:
+    ready = _file_exists_with_content(RATINGS_OUTPUT_PATH)
+    return {
+        "ready": ready,
+        "missing_or_empty": [] if ready else [str(RATINGS_OUTPUT_PATH.relative_to(REPO_ROOT))],
+    }
+
+
 def live_outputs_status() -> dict[str, object]:
     missing_or_empty = [
         str(path.relative_to(REPO_ROOT))
@@ -111,37 +129,63 @@ def live_outputs_status() -> dict[str, object]:
     }
 
 
+def _run_main_command(args: list[str], logger: logging.Logger, log_message: str) -> bool:
+    logger.info(log_message)
+    try:
+        subprocess.run(
+            [sys.executable, str(REPO_ROOT / "main.py"), *args],
+            cwd=REPO_ROOT,
+            check=True,
+        )
+        return True
+    except Exception as ex:
+        logger.warning(
+            "BOOTSTRAP command failed args=%s error=%s: %s",
+            " ".join(args),
+            type(ex).__name__,
+            ex,
+        )
+        return False
+
+
 def bootstrap_live_data_generation(logger: logging.Logger | None = None) -> dict[str, object]:
     ensure_runtime_dirs()
     logger = logger or build_public_logger("bootstrap")
-    status = live_outputs_status()
-    if status["ready"]:
+    ratings_status = ratings_output_status()
+    live_status = live_outputs_status()
+
+    if ratings_status["ready"] and live_status["ready"]:
         return {
             "ran": False,
             "ready": True,
             "missing_or_empty": [],
+            "ratings_ready": True,
         }
 
-    logger.info(
-        "BOOTSTRAP running live data generation missing=%s",
-        ",".join(status["missing_or_empty"]) or "unknown",
-    )
-    try:
-        subprocess.run(
-            [sys.executable, str(REPO_ROOT / "main.py"), "--live"],
-            cwd=REPO_ROOT,
-            check=True,
+    ran = False
+    if not ratings_status["ready"]:
+        ran = True
+        _run_main_command(
+            ["--backfill"],
+            logger,
+            "BOOTSTRAP building ratings from scratch",
         )
-    except Exception as ex:
-        logger.warning(
-            "BOOTSTRAP live data generation failed error=%s: %s",
-            type(ex).__name__,
-            ex,
-        )
+        ratings_status = ratings_output_status()
+        live_status = live_outputs_status()
 
-    refreshed = live_outputs_status()
+    if ratings_status["ready"] and not live_status["ready"]:
+        ran = True
+        _run_main_command(
+            ["--live"],
+            logger,
+            "BOOTSTRAP running live predictions",
+        )
+        live_status = live_outputs_status()
+
     return {
-        "ran": True,
-        "ready": bool(refreshed["ready"]),
-        "missing_or_empty": list(refreshed["missing_or_empty"]),
+        "ran": ran,
+        "ready": bool(ratings_status["ready"] and live_status["ready"]),
+        "missing_or_empty": list(live_status["missing_or_empty"]),
+        "ratings_ready": bool(ratings_status["ready"]),
+        "ratings_missing_or_empty": list(ratings_status["missing_or_empty"]),
     }
